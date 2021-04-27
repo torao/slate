@@ -1,0 +1,14 @@
+// protoc --rust_out=.\src src\proto.proto
+syntax = "proto3";
+package lshtree;
+
+message Intermediate {
+  bytes hash = 1;
+  uint64 left_node = 2;
+  uint64 right_node = 3;
+}
+
+message Leaf {
+  bytes hash = 1;
+  bytes payload = 2;
+}
