@@ -1,16 +1,14 @@
 use std::fs::*;
+use std::hash::Hasher;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayBuilder, HighwayHash, Key};
-use protobuf::Message;
 
 use crate::error::Detail::{
-  ChecksumVerificationFailed, FileIsNotContentsOfLSHTree, UnknownNodeClass,
+  ChecksumVerificationFailed, FileIsNotContentsOfLSHTree, IncorrectEntryHeadOffset, TooLargePayload,
 };
-
-mod proto;
 
 #[cfg(test)]
 mod test;
@@ -40,76 +38,129 @@ impl Storage for MemStorage {
   }
 }
 
+struct HashWrite<'i> {
+  output: &'i mut dyn Storage,
+  hasher: &'i mut dyn Hasher,
+  length: usize,
+}
+
+impl<'i> Write for HashWrite<'i> {
+  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    let result = self.output.write(buf);
+    self.hasher.write(buf);
+    self.length += buf.len();
+    result
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    self.output.flush()
+  }
+}
+
+struct HashRead<'i> {
+  input: &'i mut dyn Storage,
+  hasher: &'i mut dyn Hasher,
+  length: u64,
+}
+
+impl<'i> Read for HashRead<'i> {
+  fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    let size = self.input.read(buf)?;
+    self.hasher.write(&buf[..size]);
+    self.length += size as u64;
+    Ok(size)
+  }
+}
+
 const HIGHWAYHASH64_KEY: [u64; 4] = [0u64, 1, 2, 3];
 
-pub type Hash = [u8; 32];
+pub const HASH_SIZE: usize = 32;
 
-#[derive(Debug)]
+pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
+
+pub type Hash = [u8; HASH_SIZE];
+
+#[derive(PartialEq, Eq, Debug)]
 enum Node {
-  Intermediate(proto::Intermediate),
-  Leaf(proto::Leaf),
+  Inner { left: u64, hash: Hash },
+  External { index: u64, payload: Box<Vec<u8>>, hash: Hash },
 }
 
 impl Node {
   /// 指定されたストレージにノードの情報を書き込みます。
-  pub fn write_to(&self, storage: &mut dyn Storage) -> Result<usize> {
-    // ノードの種類によって識別子とバイナリデータを取得
-    let (identifier, payload) = match self {
-      Node::Intermediate(node) => ('I', node.write_to_bytes()?),
-      Node::Leaf(leaf) => ('L', leaf.write_to_bytes()?),
+  pub fn write_to(&self, storage: &mut dyn Storage) -> Result<u32> {
+    let mut hasher = HighwayBuilder::new(Key(HIGHWAYHASH64_KEY));
+    let mut output = HashWrite { output: storage, hasher: &mut hasher, length: 0 };
+    match self {
+      Node::Inner { left, hash } => {
+        output.write_u8(0)?;
+        output.write_u64::<LittleEndian>(*left)?;
+        output.write_all(hash)?;
+      }
+      Node::External { index, payload, hash } => {
+        if payload.len() > MAX_PAYLOAD_SIZE {
+          return Err(TooLargePayload { size: payload.len() });
+        }
+        output.write_u8(1)?;
+        output.write_u64::<LittleEndian>(*index)?;
+        output.write_u32::<LittleEndian>(payload.len() as u32)?;
+        output.write_all(payload)?;
+        output.write_all(hash)?;
+      }
     };
 
-    // ノードの情報を書き込み
-    storage.write_u8(identifier as u8)?;
-    storage.write_u32::<LittleEndian>(payload.len() as u32)?;
-    storage.write_u64::<LittleEndian>(Self::checksum(&payload))?;
-    storage.write_all(&payload)?;
-    storage.write_u32::<LittleEndian>(payload.len() as u32)?;
-    Ok(1 + 4 + 8 + payload.len() + 4)
+    // トレイラーの出力
+    output.write_u32::<LittleEndian>(output.length as u32)?;
+    let length = output.length;
+
+    // チェックサムの出力 (output のスコープは終わっている)
+    let checksum = hasher.finalize64();
+    storage.write_u64::<LittleEndian>(checksum)?;
+    Ok(length as u32 + 8)
   }
 
   /// 指定されたストレージからこの位置のノードを読み込みます。
   /// 正常終了時のストレージは次のノードの先頭を指しています。
-  fn read_from(storage: &mut dyn Storage) -> Result<Node> {
-    // フィールドの読み込み
-    let node_type = storage.read_u8()?;
-    let length = storage.read_u32::<LittleEndian>()?;
-    let checksum = storage.read_u64::<LittleEndian>()?;
-    let mut payload = Vec::<u8>::with_capacity(length as usize);
-    unsafe {
-      payload.set_len(length as usize);
-    }
-    let payload = payload.as_mut();
-    storage.read_exact(payload)?;
-    let _ = storage.read_u32::<LittleEndian>()?;
+  pub fn read_from(storage: &mut dyn Storage) -> Result<Node> {
+    let mut hasher = HighwayBuilder::new(Key(HIGHWAYHASH64_KEY));
+    let mut input = HashRead { input: storage, hasher: &mut hasher, length: 0 };
 
-    // バイナリデータのチェックサムを検証
-    if checksum != Self::checksum(payload) {
-      let at = storage.stream_position()? - 1 - 4 - 8 - payload.len() as u64 - 4;
-      let length = payload.len();
-      return Err(ChecksumVerificationFailed {
-        at,
-        length,
-        expected: checksum,
-        actual: Self::checksum(payload),
-      });
-    }
-
-    // ノードの復元
-    let node = match node_type as char {
-      'I' => Node::Intermediate(proto::Intermediate::parse_from_bytes(payload)?),
-      'L' => Node::Leaf(proto::Leaf::parse_from_bytes(payload)?),
-      _ => {
-        let at = storage.stream_position()? - 1 - 4 - 8 - payload.len() as u64 - 4;
-        return Err(UnknownNodeClass { at, node_type: node_type as u8 });
+    let status = input.read_u8()?;
+    let mut hash = [0u8; HASH_SIZE];
+    let node = if (status & 1) == 0 {
+      let left = input.read_u64::<LittleEndian>()?;
+      input.read_exact(&mut hash)?;
+      Node::Inner { left, hash }
+    } else {
+      let index = input.read_u64::<LittleEndian>()?;
+      let length = input.read_u32::<LittleEndian>()?;
+      let mut payload = Vec::<u8>::with_capacity(length as usize);
+      unsafe {
+        payload.set_len(length as usize);
       }
+      input.read_exact(&mut payload)?;
+      input.read_exact(&mut hash)?;
+      Node::External { index, payload: Box::new(payload), hash }
     };
-    Ok(node)
-  }
 
-  /// 64-bit のチェックサムを算出します。
-  fn checksum(value: &[u8]) -> u64 {
-    HighwayBuilder::new(Key(HIGHWAYHASH64_KEY)).hash64(value)
+    // エントリ先頭へのオフセットを検証
+    let size = input.length;
+    let offset = input.read_u32::<LittleEndian>()?;
+    if size != offset as u64 {
+      return Err(IncorrectEntryHeadOffset { expected: size, actual: offset });
+    }
+
+    // チェックサムの検証
+    let checksum = storage.read_u64::<LittleEndian>()?;
+    let actual = hasher.finalize64();
+    if checksum != actual {
+      let pos = storage.stream_position()?;
+      let length = offset + 4 + 8;
+      let at = pos - length as u64;
+      return Err(ChecksumVerificationFailed { at, length, expected: checksum, actual });
+    }
+
+    Ok(node)
   }
 }
 
