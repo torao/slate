@@ -1,57 +1,34 @@
-use std::any::Any;
+use std::hash::Hasher;
+use std::io;
 use std::io::Seek;
-use std::io::{Cursor, ErrorKind, SeekFrom, Write};
+use std::io::{SeekFrom, Write};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use highway::{HighwayBuilder, HighwayHash, Key};
+use highway::{HighwayBuilder, Key};
 use mt19937::MT19937;
 use rand::RngCore;
 
-use crate::error::Detail::*;
-use crate::test::GarblingField::*;
-use crate::{MemStorage, Node, Result, Storage, HASH_SIZE, HIGHWAYHASH64_KEY};
+use crate::*;
+use std::cmp::max;
 
 #[test]
-fn node_serialization() -> Result<()> {
-  for node in representative_nodes() {
-    let mut storage: MemStorage = Cursor::new(Vec::new());
-    let write_length = node.write_to(&mut storage)?;
-    let storage_length = storage.seek(SeekFrom::End(0))?;
+fn entry_serialization() -> Result<()> {
+  for entry in representative_entries() {
+    // メモリ上に書き込みを行いサイズを確認
+    let mut buffer = io::Cursor::new(Vec::<u8>::new());
+    let write_length = write_entry(&mut buffer, &entry)?;
+    let storage_length = buffer.seek(SeekFrom::End(0))?;
     println!("write {} bytes, data size: {} bytes", write_length, storage_length);
     assert_eq!(write_length as u64, storage_length);
-    storage.set_position(0);
-    let expected = node;
-    let actual = Node::read_from(&mut storage).unwrap();
-    assert_eq!(expected.type_id(), actual.type_id());
-    match (expected, actual) {
-      (Node::Inner { left: l1, hash: h1 }, Node::Inner { left: l2, hash: h2 }) => {
-        let length = 1 + 8 + HASH_SIZE + 4 + 8;
-        assert_eq!(length, write_length as usize);
-        assert_eq!(length, storage_length as usize);
-        assert_eq!(l1, l2);
-        assert_eq!(h1, h2);
-      }
-      (
-        Node::External { index: i1, payload: p1, hash: h1 },
-        Node::External { index: i2, payload: p2, hash: h2 },
-      ) => {
-        let length = 1 + 8 + 4 + p1.len() + HASH_SIZE + 4 + 8;
-        assert_eq!(length, write_length as usize);
-        assert_eq!(length, storage_length as usize);
-        assert_eq!(i1, i2);
-        assert_eq!(p1, p2);
-        assert_eq!(h1, h2);
-      }
-      _ => panic!("the recovered node was different"),
-    }
+
+    // 直列化後に復元したエントリと元のエントリが同一かを確認
+    buffer.set_position(0);
+    let expected = entry;
+    let actual = read_entry(&mut buffer)?;
+    assert_eq!(expected, actual);
 
     // チェックサムの確認
-    let expected = expected_checksum(&mut storage)?;
-    let binary = storage.get_ref();
-    let binary = &binary[0..write_length as usize - 8];
-    println!("{}: {:X?}", binary.len(), binary);
-    let actual = checksum(binary);
-    assert_eq!(expected, actual);
+    verify_checksum(buffer.get_ref());
   }
   Ok(())
 }
@@ -60,50 +37,28 @@ fn node_serialization() -> Result<()> {
 /// 検証します。
 #[test]
 fn garbled_at_any_position() -> Result<()> {
-  for node in representative_nodes() {
-    let mut storage: MemStorage = Cursor::new(Vec::new());
-    let write_length = node.write_to(&mut storage)?;
+  for entry in representative_entries() {
+    let mut storage = io::Cursor::new(Vec::<u8>::new());
+    let write_length = write_entry(&mut storage, &entry)?;
     let storage_length = storage.seek(SeekFrom::End(0))?;
     assert_eq!(write_length as u64, storage_length);
     storage.seek(SeekFrom::Start(0))?;
-    assert_eq!(node, Node::read_from(&mut storage)?);
+    assert_eq!(entry, read_entry(&mut storage)?);
 
     for position in 0..storage_length {
-      let field = get_garbling_field(&mut storage, position)?;
-
       // データ破損の設定
       storage.seek(SeekFrom::Start(position))?;
       let correct = storage.read_u8()?;
       storage.seek(SeekFrom::Current(-1))?;
       storage.write_u8(!correct)?;
 
-      // データ破損のフィールドに対して Node::read_from() で発生する可能性のあるすべてのエラーを検証
+      // データ破損に対して LSHT::read_entry() でエラーが発生することを検証
+      // TODO 最終的に、どのフィールドのバイト値が破損したかを識別して想定したエラーが検知されていることを確認する
       storage.seek(SeekFrom::Start(0))?;
-      match Node::read_from(&mut storage).unwrap_err() {
-        ChecksumVerificationFailed { at, length, expected, actual } => {
-          assert_ne!(expected, actual);
-          assert_eq!(0, at);
-          assert_eq!(write_length, length);
-          assert_eq!(expected_checksum(&mut storage)?, expected);
-          assert_eq!(actual_checksum(&mut storage)?, actual);
-        }
-        IncorrectEntryHeadOffset { expected, actual } if [Status, HeadOffset].contains(&field) => {
-          assert_ne!(expected, actual as u64);
-          if field != GarblingField::Status {
-            assert_eq!(write_length as u64 - 4 - 8, expected, "{}", position);
-          }
-        }
-        Io { source }
-          if source.kind() == ErrorKind::UnexpectedEof && [Status, ELength].contains(&field) =>
-        {
-          // noop
-        }
-        unexpected => {
-          panic!("It's not expected that corruption of the {:?} field (position {}) will result in an {:?}.", &field, position, unexpected);
-        }
-      }
+      let result = read_entry(&mut storage);
+      assert!(result.is_err(), "{:?}", result);
 
-      // 終了処理
+      // 破損したデータをもとに戻す
       storage.seek(SeekFrom::Start(position))?;
       storage.write_u8(correct)?;
     }
@@ -111,110 +66,49 @@ fn garbled_at_any_position() -> Result<()> {
   Ok(())
 }
 
-/// ストレージに記録されているチェックサムを参照。
-fn expected_checksum(storage: &mut dyn Storage) -> Result<u64> {
-  let content = content_size(storage)?;
-  storage.seek(SeekFrom::Start(1 + content + 4))?;
-  Ok(storage.read_u64::<LittleEndian>()?)
-}
+/// エントリの直列表現のチェックサムを検証します。
+fn verify_checksum(entry: &[u8]) {
+  let mut cursor = io::Cursor::new(entry);
 
-/// ストレージの実際のチェックサムを参照。
-fn actual_checksum(storage: &mut dyn Storage) -> Result<u64> {
-  let length = 1 + content_size(storage)? as usize + 4;
-  let mut buffer = Vec::<u8>::with_capacity(length);
-  unsafe { buffer.set_len(length) }
-  storage.seek(SeekFrom::Start(0))?;
-  storage.read_exact(buffer.as_mut())?;
-  Ok(checksum(&buffer))
-}
+  // エントリの直列化表現に記録されているチェックサムを参照
+  cursor.seek(SeekFrom::End(-8)).unwrap();
+  let expected = cursor.read_u64::<LittleEndian>().unwrap();
 
-/// ノードタイプを参照。
-fn get_node_type(storage: &mut dyn Storage) -> Result<u8> {
-  storage.seek(SeekFrom::Start(0))?;
-  Ok(storage.read_u8()? & 1)
-}
+  // エントリの実際のチェックサムを算出
+  let actual = checksum(&entry[0..entry.len() - 8]);
 
-/// ノードの内容部分のサイズを参照。
-fn content_size(storage: &mut dyn Storage) -> Result<u64> {
-  if get_node_type(storage)? == 0 {
-    Ok(8 + HASH_SIZE as u64)
-  } else {
-    storage.seek(SeekFrom::Start(1 + 8))?;
-    Ok(8 + 4 + storage.read_u32::<LittleEndian>()? as u64 + HASH_SIZE as u64)
-  }
+  assert_eq!(expected, actual);
 }
 
 /// 指定されたバイナリデータに対するチェックサムを算出。
 fn checksum(bytes: &[u8]) -> u64 {
   let mut hasher = HighwayBuilder::new(Key(HIGHWAYHASH64_KEY));
   hasher.write_all(bytes).unwrap();
-  hasher.finalize64()
+  hasher.finish()
 }
 
-#[derive(PartialEq, Debug)]
-enum GarblingField {
-  Status,
-  ILeft,
-  IHash,
-  EIndex,
-  ELength,
-  EPayload,
-  EHash,
-  HeadOffset,
-  Checksum,
-}
-
-fn get_garbling_field(storage: &mut dyn Storage, pos: u64) -> Result<GarblingField> {
-  let content = content_size(storage)?;
-  Ok(if pos == 0 {
-    GarblingField::Status
-  } else if pos >= 1 + content {
-    if pos < 1 + content + 4 {
-      GarblingField::HeadOffset
-    } else if pos < 1 + content + 4 + 8 {
-      GarblingField::Checksum
-    } else {
-      panic!()
-    }
-  } else if get_node_type(storage)? == 0 {
-    if pos < 1 + 8 {
-      GarblingField::ILeft
-    } else if pos < 1 + 8 + HASH_SIZE as u64 {
-      GarblingField::IHash
-    } else {
-      unreachable!()
-    }
-  } else {
-    if pos < 1 + 8 {
-      GarblingField::EIndex
-    } else if pos < 1 + 8 + 4 {
-      GarblingField::ELength
-    } else {
-      storage.seek(SeekFrom::Start(1 + 8))?;
-      let length = storage.read_u32::<LittleEndian>()?;
-      if pos < 1 + 8 + 4 + length as u64 {
-        GarblingField::EPayload
-      } else if pos < 1 + 8 + 4 + length as u64 + HASH_SIZE as u64 {
-        GarblingField::EHash
-      } else {
-        unreachable!()
-      }
-    }
-  })
-}
-
-// TODO ストレージ末尾の 4 バイトの指す位置がたまたま最後より前の要素だった場合に、その要素を最後の要素とみなして後続が上書きされないように検証すること。
+// TODO ストレージ末尾の 4 バイトの指す位置がたまたま最後より前の要素だった場合に、その要素を最後の要素とみなして
+// 後続が上書きされないように検証すること。
 
 /// テストに使用する代表的なノードの一覧を参照。
-fn representative_nodes() -> Vec<Node> {
+fn representative_entries() -> Vec<Entry> {
   vec![
-    Node::Inner { left: 100u64, hash: random_hash(62288902) },
-    Node::External {
-      index: 0,
-      payload: random_payload(100, 40808231),
-      hash: random_hash(4322844765),
-    },
+    Entry { enode: enode(1, 0, random_payload(5, 302875)), inodes: vec![] },
+    Entry { enode: enode(2, 0, random_payload(826, 48727)), inodes: vec![inode(2, 1, 0)] },
   ]
+}
+
+fn enode(i: u64, position: u64, payload: Box<Vec<u8>>) -> ENode {
+  ENode { address: Address { i, j: 0, position }, payload, hash: random_hash(position ^ i) }
+}
+
+fn inode(i: u64, j: u8, position: u64) -> INode {
+  INode {
+    address: Address { i, j, position },
+    left: Address { i: i - 1, j: 0, position: max(position as i64 - 100, 0) as u64 },
+    right: Address { i, j: j - 1, position },
+    hash: random_hash(position ^ j as u64),
+  }
 }
 
 fn random_payload(length: usize, s: u64) -> Box<Vec<u8>> {
