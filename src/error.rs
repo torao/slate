@@ -2,12 +2,12 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Detail {
-  // ストレージの内容が LSHT ではない
-  #[error("The contents of storage are not for LSHT: {message}")]
-  FileIsNotContentsOfLSHTree { message: &'static str },
+  // ストレージの内容が MVHT ではない
+  #[error("The contents of storage are not for MVHT: {message}")]
+  FileIsNotContentsOfMVHTree { message: &'static str },
 
   // 互換性のないファイルバージョン
-  #[error("LSHT storage version is incompatible: {0}.{1}")]
+  #[error("MVHT storage version is incompatible: {0}.{1}")]
   IncompatibleVersion(u8, u8),
 
   // ペイロードのサイズが大きすぎる
@@ -33,6 +33,10 @@ pub enum Detail {
   // ノードの読み出し位置が不正
   #[error("DAMAGED STORAGE: the read start position is not a correct node boundary")]
   IncorrectNodeBoundary { at: u64 },
+
+  // 内部状態とストレージ上のデータが矛盾している
+  #[error("INCONSISTENCY STATE: between the internally state and the data in storage; {message}")]
+  InternalStateInconsistency { message: String },
 
   #[error("I/O error: {source}")]
   Io {

@@ -1,5 +1,5 @@
 [package]
-name = "xashdb"
+name = "mvht"
 version = "0.1.0"
 authors = ["TAKAMI Torao <koiroha@gmail.com>"]
 edition = "2018"
@@ -12,7 +12,18 @@ log4rs = "1"
 thiserror = "1"
 byteorder = "1"
 highway = "0.6"
+sha2 = "0.9"
 
 [dev-dependencies]
 rand = "0.8"
 mt19937 = "2.0"
+
+[features]
+default = ["highwayhash64", "panic_over_inconsistency"]
+highwayhash64 = []
+sha224 = []
+sha256 = []
+sha512 = []
+sha512_224 = []
+sha512_256 = []
+panic_over_inconsistency = []
