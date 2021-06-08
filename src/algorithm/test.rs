@@ -1,6 +1,7 @@
 use std::iter::FromIterator;
 
-use crate::algorithm::{ceil_log2, floor_log2, Generation, Node};
+use crate::algorithm::{ceil_log2, floor_log2, Generation, Node, Path, Step};
+use crate::Index;
 
 #[test]
 #[should_panic]
@@ -29,7 +30,7 @@ fn test_generation() {
   };
 
   // 高さ j の完全二分木の次のケース
-  let post_pbt = |j: u8| -> (u64, Vec<u8>, Vec<u8>, Vec<(u64, u8)>) {
+  let post_pbt = |j: u8| -> (Index, Vec<u8>, Vec<u8>, Vec<(Index, u8)>) {
     ((1 << j) + 1, vec![j + 1], vec![j + 1], vec![(1 << j, j), ((1 << j) + 1, 0)])
   };
 
@@ -84,9 +85,49 @@ fn test_generation() {
   }
 }
 
+/// n 個の要素を含む木構造 T_n のルートノードは b_{n,ceil(log₂ n)} です。
+#[test]
+fn test_generation_root() {
+  for (n, expected) in ns().map(|i| (i, (i, ceil_log2(i)))) {
+    let Node { i, j } = Generation::new(n).root();
+    assert_eq!(expected, (i, j), "{:?}", Generation::new(n));
+  }
+}
+
+#[test]
+fn test_generation_path_to() {
+  let path = |i: u64, steps: Vec<((Index, u8), (Index, u8))>| -> Path {
+    let steps = steps.iter()
+      .map(|s| Step { step: Node::new(s.0.0, s.0.1), neighbor: Node::new(s.1.0, s.1.1) })
+      .collect();
+    Path { root: Node::new(i, ceil_log2(i)), steps }
+  };
+  let mut cases = vec![
+    (2, (1, 0), path(2, vec![((1, 0), (2, 0))])),
+    (2, (2, 0), path(2, vec![((2, 0), (1, 0))])),
+    (3, (2, 1), path(3, vec![((2, 1), (3, 0))])),
+    (3, (3, 0), path(3, vec![((3, 0), (2, 1))])),
+    (3, (1, 0), path(3, vec![((2, 1), (3, 0)), ((1, 0), (2, 0))])),
+    (3, (2, 0), path(3, vec![((2, 1), (3, 0)), ((2, 0), (1, 0))])),
+    (13, (1, 0), path(13, vec![((8, 3), (13, 3)), ((4, 2), (8, 2)), ((2, 1), (4, 1)), ((1, 0), (2, 0))])),
+    (13, (6, 0), path(13, vec![((8, 3), (13, 3)), ((8, 2), (4, 2)), ((6, 1), (8, 1)), ((6, 0), (5, 0))])),
+    (13, (13, 3), path(13, vec![((13, 3), (8, 3))])),
+    (13, (13, 0), path(13, vec![((13, 3), (8, 3)), ((13, 0), (12, 2))])),
+  ];
+  cases.append(ns()
+    .map(|i| (i, (i, ceil_log2(i)), path(i, vec![])))
+    .collect::<Vec<(u64, (u64, u8), Path)>>().as_mut());
+  for (n, (i, j), expected) in cases {
+    println!("{}: ({}, {})", n, i, j);
+    let gen = Generation::new(n);
+    let actual = gen.path_to(i, j).unwrap();
+    assert_eq!(expected, actual)
+  }
+}
+
 #[test]
 fn test_floor_and_ceil_log2() {
-  fn expected_floor(mut n: u64) -> u8 {
+  fn expected_floor(mut n: Index) -> u8 {
     let mut rank: u8 = 0;
     while n != 0 {
       rank += 1;
@@ -94,7 +135,7 @@ fn test_floor_and_ceil_log2() {
     }
     rank - 1
   }
-  fn expected_ceil(n: u64) -> u8 {
+  fn expected_ceil(n: Index) -> u8 {
     let rank = expected_floor(n);
     rank + (if n == (1 << rank) { 0 } else { 1 })
   }
@@ -114,7 +155,7 @@ fn test_floor_and_ceil_log2() {
     0xFFFFFFFFFFFFFFFE,
     0xFFFFFFFFFFFFFFFF,
   ] {
-    println!("⌊log₂ {}⌋ = {}, ⌈log₂ {}⌉ = {}", x, floor_log2(x), x, ceil_log2(x));
+    println!("floor(log₂ {}) = {}, ceil(log₂ {}) = {}", x, floor_log2(x), x, ceil_log2(x));
     assert_eq!(expected_floor(x), floor_log2(x));
     assert_eq!(expected_ceil(x), ceil_log2(x));
   }
@@ -130,4 +171,12 @@ fn test_floor_log2_with_zero() {
 #[should_panic]
 fn test_ceil_log2_with_zero() {
   ceil_log2(0);
+}
+
+fn ns() -> impl Iterator<Item=u64> {
+  (1u64..1024).chain(
+    (10..63).map(|i| vec![(1 << i) - 1, 1 << i, (1 << i) + 1]).flatten()
+  ).chain(
+    vec![u64::MAX - 2, u64::MAX - 1, u64::MAX]
+  )
 }

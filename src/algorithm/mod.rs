@@ -3,14 +3,26 @@ use std::fmt::Debug;
 #[cfg(test)]
 mod test;
 
+#[cfg(not(feature = "small_index"))]
+pub type Index = u64;
+
+#[cfg(feature = "small_index")]
+pub type Index = u32;
+
+#[cfg(not(feature = "small_index"))]
+pub const INDEX_SIZE: u8 = 64;
+
+#[cfg(feature = "small_index")]
+pub const INDEX_SIZE: u8 = 32;
+
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct Node {
-  pub i: u64,
+  pub i: Index,
   pub j: u8,
 }
 
 impl Node {
-  pub fn new(i: u64, j: u8) -> Node {
+  pub fn new(i: Index, j: u8) -> Node {
     Node { i, j }
   }
 }
@@ -28,9 +40,27 @@ impl INode {
   }
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+pub struct Step {
+  pub step: Node,
+  pub neighbor: Node,
+}
+
+#[derive(Eq, PartialEq, Clone, Debug)]
+pub struct Path {
+  pub root: Node,
+  pub steps: Vec<Step>,
+}
+
+#[derive(Eq, PartialEq, Clone, Debug)]
+pub struct PathWithNeighbors {
+  pub path: Path,
+  pub neighbors: Vec<Node>,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Generation {
-  n: u64,
+  n: Index,
   pbst_roots: Vec<Node>,
   ephemeral_nodes: Vec<INode>,
 }
@@ -38,7 +68,7 @@ pub struct Generation {
 impl Generation {
   /// 木構造 𝑇ₙ に含まれる独立した完全二分木のルートノードとそれらを接続する中間ノードを算出します。この列は木構造の
   /// 左に存在する完全二分木が先に来るように配置されています。
-  pub fn new(n: u64) -> Generation {
+  pub fn new(n: Index) -> Generation {
     debug_assert_ne!(0, n);
     let pbst_roots = Generation::create_pbst_roots(n);
     let ephemeral_nodes = Generation::create_ephemeral_nodes(n, &pbst_roots);
@@ -47,17 +77,23 @@ impl Generation {
   }
 
   /// この世代が何世代目かを参照します。
-  pub fn n(&self) -> u64 {
+  pub fn n(&self) -> Index {
     self.n
   }
 
+  /// この世代のルートノードを参照します。
+  pub fn root(&self) -> Node {
+    self.ephemeral_nodes.first().map(|i| i.node)
+      .unwrap_or(*self.pbst_roots.first().unwrap())
+  }
+
   /// 独立した完全二分木のルートノードを列挙します。
-  pub fn pbst_roots(&self) -> impl Iterator<Item = &Node> {
+  pub fn pbst_roots(&self) -> impl Iterator<Item=&Node> {
     self.pbst_roots.iter()
   }
 
   /// 一過性の中間ノードを列挙します。
-  pub fn ephemeral_nodes(&self) -> impl Iterator<Item = &INode> {
+  pub fn ephemeral_nodes(&self) -> impl Iterator<Item=&INode> {
     self.ephemeral_nodes.iter()
   }
 
@@ -79,8 +115,90 @@ impl Generation {
     inodes
   }
 
+  /// 一過性の中間ノードをたどって b_{i,j} を含む完全二分木のルートノードを検索します。ノードを 1 ステップ進むたびに
+  /// `on_step(from, to)` のコールバックが行われます。b_{i,j} が一過性の中間ノードの場合 `Either::Right(node)`
+  /// を返し、b_{i,j} を含む完全二分木のルートノードの場合 `Either::Left(root)` を返します。
+  pub fn path_to(&self, i: Index, j: u8) -> Option<Path> {
+    let root = self.root();
+    if !contains(root.i, root.j, i) {
+      return None;
+    }
+
+    // 一過性の中間ノードをたどって b_{i,j} を含む完全二分木のルートノードを検索する
+    let mut steps = Vec::<Step>::with_capacity(INDEX_SIZE as usize);
+    let pbst = if let Some(pbst) = self.ephemeral_nodes.last().map(|i| i.right) {
+      let mut pbst = pbst;
+      for x in 0..self.ephemeral_nodes.len() {
+        let node = &self.ephemeral_nodes[x];
+
+        // 目的のノードを検出した場合
+        if node.node.i == i && node.node.j == j {
+          return Some(Path { root, steps });
+        }
+
+        // 左枝側 (完全二分木) に含まれている場合は左枝を始点に設定
+        if contains(node.left.i, node.left.j, i) {
+          steps.push(Step { step: node.left, neighbor: node.right });
+          pbst = node.left;
+          break;
+        }
+
+        // このノードの次のステップを保存
+        steps.push(Step { step: node.right, neighbor: node.left });
+      }
+      pbst
+    } else {
+      root
+    };
+
+    if pbst.i == i && pbst.j == j {
+      return Some(Path { root, steps });
+    }
+
+    // 完全二分木上の経路を構築
+    let mut mover = Self::pbst_inode(pbst.i, pbst.j);
+    for _ in 0..INDEX_SIZE {
+      // 目的のノードを検出した場合
+      if mover.node.i == i && mover.node.j == j {
+        return Some(Path { root, steps });
+      }
+      let (next, neighbor) = if contains(mover.left.i, mover.left.j, i) {
+        (mover.left, mover.right)
+      } else {
+        debug_assert!(contains(mover.right.i, mover.right.j, i),
+                      "the subtree T_{{{},{}}} doesn't contain node b_{{{},{}}}", mover.right.i, mover.right.j, i, j);
+        (mover.right, mover.left)
+      };
+      steps.push(Step { step: next, neighbor });
+      if next.j != 0 {
+        mover = Self::pbst_inode(next.i, next.j);
+      } else {
+        return Some(Path { root, steps });
+      }
+    }
+    unreachable!("maximum step was reached in searching the route to ({}, {}) -> {:?}", i, j, steps)
+  }
+
+  fn inode(&self, i: Index, j: u8) -> Option<INode> {
+    if is_pbst(i, j) && i < self.n() {
+      Some(Self::pbst_inode(i, j))
+    } else {
+      self.ephemeral_nodes().find(|node| node.node.i == i && node.node.j == j).map(|i| *i)
+    }
+  }
+
+  #[inline]
+  fn pbst_inode(i: Index, j: u8) -> INode {
+    debug_assert!(is_pbst(i, j));
+    debug_assert_ne!(0, j);
+    INode::new(
+      Node::new(i, j),
+      Node::new(i - (1 << (j - 1)), j - 1),
+      Node::new(i, j - 1))
+  }
+
   /// 完全二分木のルートノードを構築します。
-  fn create_pbst_roots(n: u64) -> Vec<Node> {
+  fn create_pbst_roots(n: Index) -> Vec<Node> {
     let capacity = ceil_log2(n) as usize;
     let mut remaining = n;
     let mut pbsts = Vec::<Node>::with_capacity(capacity);
@@ -94,7 +212,7 @@ impl Generation {
   }
 
   /// 一過性の中間ノードを参照します。
-  fn create_ephemeral_nodes(n: u64, pbsts: &Vec<Node>) -> Vec<INode> {
+  fn create_ephemeral_nodes(n: Index, pbsts: &Vec<Node>) -> Vec<INode> {
     debug_assert_ne!(0, pbsts.len());
     let mut ephemerals = Vec::<INode>::with_capacity(pbsts.len() - 1);
     for i in 0..pbsts.len() - 1 {
@@ -112,15 +230,25 @@ impl Generation {
   }
 }
 
+/// b_{i,j} をルートとする部分木にノード b_{k,*} が含まれているかを判定します。これは T_{k,*} b_{i,]} が
+/// T_{i,j} の部分木かの判定と同じです。
 #[inline]
-pub fn is_pbst(i: u64, j: u8) -> bool {
-  i & ((1 << j) - 1) == 0
+pub fn contains(i: Index, j: u8, k: Index) -> bool {
+  debug_assert!(j <= 64);   // i=u64::MAX のとき j=64
+  let i_min = (((i as u128 >> j) - (if is_pbst(i, j) { 1 } else { 0 })) << j) as u64 + 1;
+  let i_max = i;
+  k >= i_min && k <= i_max
+}
+
+#[inline]
+pub fn is_pbst(i: Index, j: u8) -> bool {
+  i & (((1u128 << j) - 1) as u64) == 0
 }
 
 /// 指定された `x` に対して `𝑦=⌈log₂ 𝑥⌉` を求めます。返値は 0 (x=1) から 64 (x=u64::MAX) の範囲となります。
 /// `x` に 0 を指定することはできません。
 #[inline]
-pub fn ceil_log2(x: u64) -> u8 {
+pub fn ceil_log2(x: Index) -> u8 {
   let rank = floor_log2(x);
   rank + (if x & ((1 << rank) - 1) == 0 { 0 } else { 1 })
 }
@@ -128,7 +256,7 @@ pub fn ceil_log2(x: u64) -> u8 {
 /// 指定された `x` に対して `𝑦=⌊log₂ 𝑥⌋` を求めます。返値は 0 (x=1) から 63 (x=u64::MAX) の範囲となります。
 /// `x` に 0 を指定することはできません。
 #[inline]
-pub fn floor_log2(x: u64) -> u8 {
+pub fn floor_log2(x: Index) -> u8 {
   // まずビット列の中で最も上位に存在する 1 の位置より右側のすべてのビットが 1 となるようにビット論理和を繰り返し、
   // 次に数値内で 1 となっているビットの数を数えるというアプローチ (可能であれば後半は POPCNT CPU 命令が使う方が
   // 良いかもしれない)。
