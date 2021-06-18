@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::ops::RangeInclusive;
 
 #[cfg(test)]
 mod test;
@@ -83,17 +84,16 @@ impl Generation {
 
   /// この世代のルートノードを参照します。
   pub fn root(&self) -> Node {
-    self.ephemeral_nodes.first().map(|i| i.node)
-      .unwrap_or(*self.pbst_roots.first().unwrap())
+    self.ephemeral_nodes.first().map(|i| i.node).unwrap_or(*self.pbst_roots.first().unwrap())
   }
 
   /// 独立した完全二分木のルートノードを列挙します。
-  pub fn pbst_roots(&self) -> impl Iterator<Item=&Node> {
+  pub fn pbst_roots(&self) -> impl Iterator<Item = &Node> {
     self.pbst_roots.iter()
   }
 
   /// 一過性の中間ノードを列挙します。
-  pub fn ephemeral_nodes(&self) -> impl Iterator<Item=&INode> {
+  pub fn ephemeral_nodes(&self) -> impl Iterator<Item = &INode> {
     self.ephemeral_nodes.iter()
   }
 
@@ -153,6 +153,8 @@ impl Generation {
 
     if pbst.i == i && pbst.j == j {
       return Some(Path { root, steps });
+    } else if pbst.j < j {
+      return None;
     }
 
     // 完全二分木上の経路を構築
@@ -165,8 +167,14 @@ impl Generation {
       let (next, neighbor) = if contains(mover.left.i, mover.left.j, i) {
         (mover.left, mover.right)
       } else {
-        debug_assert!(contains(mover.right.i, mover.right.j, i),
-                      "the subtree T_{{{},{}}} doesn't contain node b_{{{},{}}}", mover.right.i, mover.right.j, i, j);
+        debug_assert!(
+          contains(mover.right.i, mover.right.j, i),
+          "the subtree T_{{{},{}}} doesn't contain node b_{{{},{}}}",
+          mover.right.i,
+          mover.right.j,
+          i,
+          j
+        );
         (mover.right, mover.left)
       };
       steps.push(Step { step: next, neighbor });
@@ -179,8 +187,11 @@ impl Generation {
     unreachable!("maximum step was reached in searching the route to ({}, {}) -> {:?}", i, j, steps)
   }
 
-  fn inode(&self, i: Index, j: u8) -> Option<INode> {
-    if is_pbst(i, j) && i < self.n() {
+  /// 指定された中間ノード b_{i,j} を返します。該当する中間ノードが存在しない場合は `None` を返します。
+  pub fn inode(&self, i: Index, j: u8) -> Option<INode> {
+    if j == 0 {
+      None
+    } else if is_pbst(i, j) && i < self.n() {
       Some(Self::pbst_inode(i, j))
     } else {
       self.ephemeral_nodes().find(|node| node.node.i == i && node.node.j == j).map(|i| *i)
@@ -189,12 +200,9 @@ impl Generation {
 
   #[inline]
   fn pbst_inode(i: Index, j: u8) -> INode {
-    debug_assert!(is_pbst(i, j));
-    debug_assert_ne!(0, j);
-    INode::new(
-      Node::new(i, j),
-      Node::new(i - (1 << (j - 1)), j - 1),
-      Node::new(i, j - 1))
+    debug_assert!(is_pbst(i, j), "({}, {}) is not a PBST", i, j);
+    debug_assert_ne!(0, j, "({}, {}) is a leaf node, not a inode", i, j);
+    INode::new(Node::new(i, j), Node::new(i - (1 << (j - 1)), j - 1), Node::new(i, j - 1))
   }
 
   /// 完全二分木のルートノードを構築します。
@@ -230,14 +238,21 @@ impl Generation {
   }
 }
 
-/// b_{i,j} をルートとする部分木にノード b_{k,*} が含まれているかを判定します。これは T_{k,*} b_{i,]} が
-/// T_{i,j} の部分木かの判定と同じです。
+/// b_{i,j} をルートとする部分木に含まれる葉ノード b_l の範囲を算出します。
 #[inline]
-pub fn contains(i: Index, j: u8, k: Index) -> bool {
-  debug_assert!(j <= 64);   // i=u64::MAX のとき j=64
+pub fn range(i: Index, j: u8) -> RangeInclusive<Index> {
+  debug_assert!(j <= 64); // i=u64::MAX のとき j=64
   let i_min = (((i as u128 >> j) - (if is_pbst(i, j) { 1 } else { 0 })) << j) as u64 + 1;
   let i_max = i;
-  k >= i_min && k <= i_max
+  i_min..=i_max
+}
+
+/// b_{i,j} をルートとする部分木にノード b_{k,*} が含まれているかを判定します。これは T_{k,*} が T_{i,j} の
+/// 部分木かの判定と同じです。
+#[inline]
+pub fn contains(i: Index, j: u8, k: Index) -> bool {
+  debug_assert!(j <= 64); // i=u64::MAX のとき j=64
+  range(i, j).contains(&k)
 }
 
 #[inline]

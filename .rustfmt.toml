@@ -1,3 +1,4 @@
 # https://github.com/rust-lang/rustfmt/blob/master/Configurations.md
 tab_spaces = 2
+max_width = 120
 use_small_heuristics = "Max"

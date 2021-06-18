@@ -2,14 +2,14 @@ use std::cmp::min;
 use std::fmt::{Debug, Formatter};
 use std::fs::*;
 use std::io;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, LockResult, RwLock};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayBuilder, Key};
 
-use crate::algorithm::Generation;
+use crate::algorithm::{range, Generation};
 use crate::checksum::{HashRead, HashWrite};
 use crate::error::Detail;
 use crate::error::Detail::*;
@@ -131,17 +131,26 @@ pub type Index = algorithm::Index;
 
 pub const INDEX_SIZE: u8 = algorithm::INDEX_SIZE;
 
-/// HashTree から取得したハッシュ値付きのノードを表します。
+/// 目的のノードへの経路から分岐するハッシュ値付きのノードを表します。
 #[derive(PartialEq, Eq, Copy, Clone)]
-pub struct NodeHash {
+pub struct Branch {
   pub i: Index,
   pub j: u8,
   pub hash: Hash,
 }
 
-impl Debug for NodeHash {
+impl Branch {
+  pub fn new(i: Index, j: u8, hash: Hash) -> Branch {
+    Branch { i, j, hash }
+  }
+  fn for_node(node: &Node) -> Branch {
+    Self::new(node.address.i, node.address.j, node.hash.clone())
+  }
+}
+
+impl Debug for Branch {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-    f.debug_tuple("HashNode").field(&self.i).field(&self.j).field(&self.hash.to_str()).finish()
+    f.write_str(&format!("{},{}:{}", self.i, self.j, hex(&self.hash.value)))
   }
 }
 
@@ -154,7 +163,7 @@ pub struct Value {
 
 impl Debug for Value {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-    f.debug_tuple("Value").field(&self.i).field(&hex(&self.value)).finish()
+    f.write_str(&format!("{}:{}", self.i, hex(&self.value)))
   }
 }
 
@@ -162,12 +171,56 @@ impl Debug for Value {
 #[derive(Debug)]
 pub struct DataSet {
   values: Vec<Value>,
-  hashes: Vec<NodeHash>,
+  branches: Vec<Branch>,
 }
 
 impl DataSet {
+  pub fn new(values: Vec<Value>, branches: Vec<Branch>) -> DataSet {
+    // values は連続していなければならない
+    #[cfg(debug_assertions)]
+    for i in 0..values.len() - 1 {
+      debug_assert_eq!(values[i].i + 1, values[i + 1].i);
+    }
+    DataSet { values, branches }
+  }
+
   pub fn root_hash(&self) -> Hash {
-    todo!()
+    let mut hashes = self
+      .values
+      .iter()
+      .map(|value| Branch { i: value.i, j: 0u8, hash: Hash::hash(&value.value) })
+      .collect::<Vec<Branch>>();
+    while hashes.len() > 1 {
+      // hashes の要素数が奇数の場合は最も右もノードが一過性の中間ノードに属する
+      for k in 0..hashes.len() / 2 {
+        let left = &hashes[k * 2];
+        let right = &hashes[k * 2 + 1];
+        debug_assert!(left.j >= right.j);
+        let i = right.i;
+        let j = left.j + 1;
+        let hash = left.hash.combine(&right.hash);
+        hashes[k] = Branch { i, j, hash };
+      }
+      // 結合されていない一過性の中間ノードを次に残す
+      let fraction = if hashes.len() % 2 != 0 {
+        let len = hashes.len();
+        hashes[len / 2] = hashes.pop().unwrap();
+        1
+      } else {
+        0
+      };
+      hashes.truncate(hashes.len() / 2 + fraction);
+    }
+    let mut folding = hashes.remove(0);
+    for k in 0..self.branches.len() {
+      let branch = &self.branches[self.branches.len() - k - 1];
+      let (left, right) = if folding.i < branch.i { (&folding, branch) } else { (branch, &folding) };
+      let i = right.i;
+      let j = left.j + 1;
+      let hash = left.hash.combine(&right.hash);
+      folding = Branch { i, j, hash };
+    }
+    folding.hash
   }
 }
 
@@ -175,21 +228,21 @@ impl DataSet {
 
 pub const HASH_SIZE: usize = {
   #[cfg(feature = "highwayhash64")]
-    {
-      8
-    }
+  {
+    8
+  }
   #[cfg(any(feature = "sha224", feature = "sha512_224"))]
-    {
-      28
-    }
+  {
+    28
+  }
   #[cfg(any(feature = "sha256", feature = "sha512_256"))]
-    {
-      32
-    }
+  {
+    32
+  }
   #[cfg(feature = "sha512")]
-    {
-      64
-    }
+  {
+    64
+  }
 };
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
@@ -203,31 +256,31 @@ impl Hash {
   }
   pub fn hash(value: &[u8]) -> Hash {
     #[cfg(feature = "highwayhash64")]
-      {
-        use highway::HighwayHash;
-        let mut builder = HighwayBuilder::default();
-        builder.write_all(value).unwrap();
-        Hash::new(builder.finalize64().to_le_bytes())
-      }
+    {
+      use highway::HighwayHash;
+      let mut builder = HighwayBuilder::default();
+      builder.write_all(value).unwrap();
+      Hash::new(builder.finalize64().to_le_bytes())
+    }
     #[cfg(not(feature = "highwayhash64"))]
-      {
-        use sha2::Digest;
-        #[cfg(feature = "sha224")]
-        use sha2::Sha224 as Sha2;
-        #[cfg(any(feature = "sha256"))]
-        use sha2::Sha256 as Sha2;
-        #[cfg(feature = "sha512")]
-        use sha2::Sha512 as Sha2;
-        #[cfg(feature = "sha512/224")]
-        use sha2::Sha512Trunc224 as Sha2;
-        #[cfg(feature = "sha512/256")]
-        use sha2::Sha512Trunc256 as Sha2;
-        let output = Sha2::digest(value);
-        debug_assert_eq!(HASH_SIZE, output.len());
-        let mut hash = [0u8; HASH_SIZE];
-        (&mut hash[..]).write_all(&output).unwrap();
-        Hash::new(hash)
-      }
+    {
+      use sha2::Digest;
+      #[cfg(feature = "sha224")]
+      use sha2::Sha224 as Sha2;
+      #[cfg(any(feature = "sha256"))]
+      use sha2::Sha256 as Sha2;
+      #[cfg(feature = "sha512")]
+      use sha2::Sha512 as Sha2;
+      #[cfg(feature = "sha512/224")]
+      use sha2::Sha512Trunc224 as Sha2;
+      #[cfg(feature = "sha512/256")]
+      use sha2::Sha512Trunc256 as Sha2;
+      let output = Sha2::digest(value);
+      debug_assert_eq!(HASH_SIZE, output.len());
+      let mut hash = [0u8; HASH_SIZE];
+      (&mut hash[..]).write_all(&output).unwrap();
+      Hash::new(hash)
+    }
   }
 
   pub fn combine(&self, other: &Hash) -> Hash {
@@ -272,13 +325,7 @@ impl Node {
 
 impl Debug for Node {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-    f.write_str(&format!(
-      "Node({},{}@{}){}",
-      self.address.i,
-      self.address.j,
-      self.address.position,
-      self.hash.to_str()
-    ))
+    f.write_str(&format!("Node({},{}@{}){}", self.address.i, self.address.j, self.address.position, self.hash.to_str()))
   }
 }
 
@@ -304,17 +351,10 @@ struct ENode {
 }
 
 #[derive(Eq, PartialEq, Debug)]
-enum Root<'a> {
+enum RootRef<'a> {
   None,
   INode(&'a INode),
   ENode(&'a ENode),
-}
-
-#[derive(Eq, PartialEq, Debug)]
-enum STRoot {
-  None,
-  INode(INode, Vec<Node>),
-  ENode(ENode, Vec<Node>),
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -326,8 +366,7 @@ struct Entry {
 // --------------------------------------------------------------------------
 
 /// HighwayHash でチェックサム用のハッシュ値を生成するためのキー (256-bit 固定値)。
-const CHECKSUM_HW64_KEY: [u64; 4] =
-  [0xFA5015F2E22BCFC6u64, 0xCE5A4ED9A4025C80, 0x16B9731717F6315E, 0x0F34D06AE93BD8E9];
+const CHECKSUM_HW64_KEY: [u64; 4] = [0xFA5015F2E22BCFC6u64, 0xCE5A4ED9A4025C80, 0x16B9731717F6315E, 0x0F34D06AE93BD8E9];
 
 /// ペイロードの最大サイズ。トレイラーの offset 値を u32 にするためにはエントリの直列化表現を最大でも `u32::MAX`
 /// とする必要があります。したがって任意帳のペイロードは 2GB までとします。
@@ -340,8 +379,7 @@ const STORAGE_MINOR_VERSION: u8 = 0u8;
 pub const STORAGE_VERSION: u8 = (STORAGE_MAJOR_VERSION << 4) | (STORAGE_MINOR_VERSION & 0x0F);
 
 fn is_version_compatible(version: u8) -> bool {
-  version >> 4 == STORAGE_MAJOR_VERSION
-    && (STORAGE_MAJOR_VERSION != 0 || version & 0x0F == STORAGE_MINOR_VERSION)
+  version >> 4 == STORAGE_MAJOR_VERSION && (STORAGE_MAJOR_VERSION != 0 || version & 0x0F == STORAGE_MINOR_VERSION)
 }
 
 /// MVHT ファイルの先頭に記録される識別子
@@ -362,12 +400,12 @@ impl<S: Storage> MVHT<S> {
     Ok(db)
   }
 
-  fn root<'a>(&self) -> Root {
+  fn root<'a>(&self) -> RootRef {
     match &self.last {
-      None => Root::None,
+      None => RootRef::None,
       Some(entry) => match entry.inodes.last() {
-        Some(inode) => Root::INode(inode),
-        None => Root::ENode(&entry.enode),
+        Some(inode) => RootRef::INode(inode),
+        None => RootRef::ENode(&entry.enode),
       },
     }
   }
@@ -417,12 +455,29 @@ impl<S: Storage> MVHT<S> {
     Ok(())
   }
 
-  /// この MVHT の現在のレベルを参照します。一つのノードも含まれていない場合は0 を返します。
-  pub fn level(&self) -> u8 {
+  pub fn n(&self) -> Index {
     match &self.root() {
-      Root::INode(inode) => inode.node.address.j,
-      Root::ENode(enode) => enode.node.address.j,
-      Root::None => 0,
+      RootRef::INode(inode) => inode.node.address.i,
+      RootRef::ENode(enode) => enode.node.address.i,
+      RootRef::None => 0,
+    }
+  }
+
+  /// この MVHT の現在の高さを参照します。一つのノードも含まれていない場合は 0 を返します。
+  pub fn height(&self) -> u8 {
+    match &self.root() {
+      RootRef::INode(inode) => inode.node.address.j,
+      RootRef::ENode(enode) => enode.node.address.j,
+      RootRef::None => 0,
+    }
+  }
+
+  /// この MVHT のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
+  pub fn root_hash(&self) -> Option<Hash> {
+    match &self.root() {
+      RootRef::INode(inode) => Some(inode.node.hash),
+      RootRef::ENode(enode) => Some(enode.node.hash),
+      RootRef::None => None,
     }
   }
 
@@ -436,13 +491,12 @@ impl<S: Storage> MVHT<S> {
     // 葉ノードの構築
     let position = self.cursor.stream_position()?;
     let i = match self.root() {
-      Root::None => 1,
-      Root::ENode(enode) => enode.node.address.i + 1,
-      Root::INode(inode) => inode.node.address.i + 1,
+      RootRef::None => 1,
+      RootRef::ENode(enode) => enode.node.address.i + 1,
+      RootRef::INode(inode) => inode.node.address.i + 1,
     };
     let hash = Hash::hash(value);
-    let enode =
-      ENode { node: Node::new(Address::new(i, 0, position), hash), payload: Vec::from(value) };
+    let enode = ENode { node: Node::new(Address::new(i, 0, position), hash), payload: Vec::from(value) };
 
     // 中間ノードの構築
     let mut cursor = self.storage.open(false)?;
@@ -477,6 +531,7 @@ impl<S: Storage> MVHT<S> {
     Ok((i, hash))
   }
 
+  /// 範囲外のインデックス (0 を含む) を指定した場合は `None` を返します。
   pub fn get(&self, i: Index) -> Result<Option<Vec<u8>>> {
     let mut cursor = self.storage.open(false)?;
     if let Some(node) = self.get_node(&mut cursor, i, 0)? {
@@ -495,42 +550,94 @@ impl<S: Storage> MVHT<S> {
   }
 
   /// 指定されたノード b_{i,j} に属しているすべての値を中間ノードのハッシュ値付きで取得します。
+  /// 範囲外のインデックス (0 を含む) を指定した場合は `None` を返します。
   pub fn get_values_with_hashes(&self, i: Index, j: u8) -> Result<Option<DataSet>> {
+    if i == 0 || i > self.n() {
+      return Ok(None);
+    }
     let mut cursor = self.storage.open(false)?;
-    let (values, branches) = match self.get_root_of_ith_generation(&mut cursor, i)? {
-      STRoot::INode(root, branches) => {
-        let i_min = (((i >> j) - (if algorithm::is_pbst(i, j) { 1 } else { 0 })) << j) + 1;
-        let i_max = i;
-        let count = i_max - i_min + 1;
-        if let Some((position, _)) = search_entry_position(&mut cursor, &root, i_min, false)? {
-          let mut values = Vec::<Value>::with_capacity(INDEX_SIZE as usize);
-          cursor.seek(io::SeekFrom::Start(position))?;
-          for x in 0..count {
-            let entry = read_entry_without_check(&mut cursor, position, i_min)?;
-            cursor.seek(io::SeekFrom::Current(4 + 8))?; // skip trailer: offset + checksum
-            let mut payload = Vec::<u8>::with_capacity(entry.enode.payload.len());
-            payload.write_all(&entry.enode.payload)?;
-            debug_assert_eq!(i_min + x, entry.enode.node.address.i);
-            values.push(Value { i: i_min + x, value: payload })
-          }
-          (values, branches)
-        } else {
-          return Ok(None);
-        }
+    let root = match self.root() {
+      RootRef::INode(inode) => *inode,
+      RootRef::ENode(enode) => {
+        cursor.seek(SeekFrom::Start(enode.node.address.position))?;
+        let Entry { enode: ENode { payload, .. }, .. } =
+          read_entry_without_check(&mut cursor, enode.node.address.position, i)?;
+        return Ok(Some(DataSet { values: vec![Value { i, value: payload }], branches: vec![] }));
       }
-      STRoot::ENode(enode, branches) if enode.node.address.i == i && j == 0 => {
-        let mut payload = Vec::<u8>::with_capacity(enode.payload.len());
-        payload.write_all(&enode.payload)?;
-        let value = Value { i, value: payload };
-        (vec![value], branches)
-      }
-      _ => return Ok(None),
+      RootRef::None => return Ok(None),
     };
-    let hashes = branches
-      .iter()
-      .map(|node| NodeHash { i: node.address.i, j: node.address.j, hash: node.hash })
-      .collect();
-    Ok(Some(DataSet { values, hashes }))
+    let gen = Generation::new(root.node.address.i);
+    let path = match gen.path_to(i, j) {
+      Some(path) => path,
+      None => return Ok(None),
+    };
+    debug_assert_eq!(gen.root().i, root.node.address.i);
+    debug_assert_eq!(gen.root().j, root.node.address.j);
+
+    // 目的のノードまで経路を移動しながら分岐のハッシュ値を取得する
+    let mut prev = root;
+    let mut inodes = self.last.as_ref().map(|l| l.inodes.clone()).unwrap();
+    let mut branches = Vec::<Branch>::with_capacity(INDEX_SIZE as usize);
+    for step in path.steps.iter().map(|s| s.step) {
+      // 左枝側のエントリの INode を読み込み (右枝側のノードは inodes に含まれている)
+      cursor.seek(SeekFrom::Start(prev.left.position))?;
+      let left_inodes = read_inodes(&mut cursor, prev.left.position)?;
+
+      // 左右どちらの枝が次のノードでどちらが分岐のノードかを判断
+      let (next, next_inodes, branch, branch_inodes) = if prev.left.i == step.i && prev.left.j == step.j {
+        (&prev.left, left_inodes, &prev.right, inodes)
+      } else {
+        debug_assert!(prev.right.i == step.i && prev.right.j == step.j);
+        (&prev.right, inodes, &prev.left, left_inodes)
+      };
+
+      // 分岐したノードのハッシュ値付きの情報を保存
+      if branch.j > 0 {
+        // INode として分岐したノードを参照して保存
+        if let Some(inode) = branch_inodes.iter().find(|n| n.node.address.j == branch.j) {
+          debug_assert!(inode.node.address == *branch);
+          branches.push(Branch::for_node(&inode.node));
+        } else {
+          panic!(
+            "in searching for b_{{{},{}}} in T_{}, branch inode b_{{{}, {}}} isn't included in {:?}",
+            i,
+            j,
+            self.n(),
+            branch.i,
+            branch.j,
+            branch_inodes
+          );
+        }
+      } else {
+        // ENode として分岐したノードを読み込んで保存
+        cursor.seek(SeekFrom::Start(branch.position))?;
+        let entry = read_entry_without_check(&mut cursor, branch.position, branch.i)?;
+        branches.push(Branch::for_node(&entry.enode.node));
+      }
+
+      if next.j == 0 {
+        debug_assert_eq!((i, j), (next.i, next.j), "branch={:?}", branch);
+        cursor.seek(SeekFrom::Start(next.position))?;
+        let Entry { enode: ENode { payload, .. }, .. } = read_entry_without_check(&mut cursor, next.position, next.i)?;
+        let values = vec![Value { i: next.i, value: payload }];
+        return Ok(Some(DataSet::new(values, branches)));
+      }
+
+      // 次のノードに移動
+      if let Some(inode) = next_inodes.iter().find(|node| node.node.address == *next) {
+        prev = *inode;
+        inodes = next_inodes;
+      } else {
+        panic!(
+          "in searching for ({},{}), the inode ({}, {}) on the route isn't included in {:?}",
+          i, j, next.i, next.j, next_inodes
+        );
+      }
+    }
+
+    // 目的のノードに含まれている値を取得する
+    let values = self.get_values_belonging_to(&mut cursor, &prev)?;
+    Ok(Some(DataSet::new(values, branches)))
   }
 
   fn get_node(&self, cursor: &mut Box<dyn Cursor>, i: Index, j: u8) -> Result<Option<Node>> {
@@ -548,34 +655,32 @@ impl<S: Storage> MVHT<S> {
     }
   }
 
-  /// i-世代でのハッシュツリーのルートノードを参照します。
-  fn get_root_of_ith_generation(&self, cursor: &mut Box<dyn Cursor>, i: Index) -> Result<STRoot> {
-    match &self.root() {
-      Root::INode(root) => {
-        if root.node.address.i == i {
-          return Ok(STRoot::INode(**root, vec![]));
-        } else if let Some((position, branches)) = self.get_entry_position(cursor, i, true)? {
-          cursor.seek(io::SeekFrom::Start(position))?;
-          if i == 1 {
-            let enode = read_entry_without_check(cursor, position, i)?;
-            return Ok(STRoot::ENode(enode.enode, branches));
-          } else {
-            let inodes = read_inodes(cursor, position)?;
-            if let Some(inode) = inodes.last().map(|n| *n) {
-              return Ok(STRoot::INode(inode, branches));
-            }
-          }
-        }
-        Ok(STRoot::None)
-      }
-      Root::ENode(root) if root.node.address.i == i => {
-        let mut payload = Vec::<u8>::with_capacity(root.payload.len());
-        payload.write_all(&root.payload)?;
-        let root = ENode { node: root.node.clone(), payload };
-        Ok(STRoot::ENode(root, vec![]))
-      }
-      _ => Ok(STRoot::None),
+  /// 指定された `inode` をルートとする部分木に含まれているすべての値を参照します。読み出し用のカーソルは `inode`
+  /// の位置を指している必要はありません。
+  fn get_values_belonging_to(&self, cursor: &mut Box<dyn Cursor>, inode: &INode) -> Result<Vec<Value>> {
+    // inode を左枝方向に葉に到達するまで移動
+    let mut mover = *inode;
+    while mover.left.j > 0 {
+      cursor.seek(SeekFrom::Start(mover.left.position))?;
+      let inodes = read_inodes(cursor, mover.left.position)?;
+      mover = match inodes.iter().find(|node| node.node.address.j == mover.left.j) {
+        Some(inode) => *inode,
+        None => panic!(),
+      };
     }
+
+    let range = range(inode.node.address.i, inode.node.address.j);
+    let (i0, i1) = (*range.start(), *range.end());
+    let mut values = Vec::<Value>::with_capacity((i1 - i0) as usize);
+    let mut i = mover.left.i;
+    cursor.seek(SeekFrom::Start(mover.left.position))?;
+    while i <= i1 {
+      let Entry { enode: ENode { node, payload }, .. } = read_entry_without_check_to_end(cursor, i)?;
+      debug_assert!(node.address.i == i);
+      values.push(Value { i, value: payload });
+      i += 1;
+    }
+    Ok(values)
   }
 
   /// `i` 番目のエントリの位置を参照します。この検索は現在のルートノードを基準にした探索を行います。
@@ -586,23 +691,44 @@ impl<S: Storage> MVHT<S> {
     with_branch: bool,
   ) -> Result<Option<(Index, Vec<Node>)>> {
     match &self.root() {
-      Root::INode(root) => {
+      RootRef::INode(root) => {
         let root = (*root).clone();
         search_entry_position(cursor, &root, i, with_branch)
       }
-      Root::ENode(root) if root.node.address.i == i => {
-        Ok(Some((root.node.address.position, vec![])))
-      }
+      RootRef::ENode(root) if root.node.address.i == i => Ok(Some((root.node.address.position, vec![]))),
       _ => Ok(None),
     }
   }
 }
+//
+// pub struct Session {
+//   cursor: Box<dyn Cursor>,
+//   generation: Generation,
+// }
+//
+// impl Session {
+/*
+/// `i` 番目のエントリの位置を参照します。この検索は現在のルートノードを基準にした探索を行います。
+fn get_entry_position(&self, i: Index) -> Result<Option<u64>> {
+  match &self.root() {
+    Root::INode(root) => {
+      let root = (*root).clone();
+      search_entry_position(cursor, &root, i, false)
+    }
+    Root::ENode(root) if root.node.address.i == i => {
+      Ok(Some(root.node.address.position))
+    }
+    _ => Ok(None),
+  }
+}
+ */
+// }
 
 /// 指定されたカーソルの現在の位置からエントリを読み込みます。
 /// 正常終了時のカーソルは次のエントリを指しています。
 fn read_entry<C>(r: &mut C, i_expected: Index) -> Result<Entry>
-  where
-    C: io::Read + io::Seek,
+where
+  C: io::Read + io::Seek,
 {
   let position = r.stream_position()?;
   let mut hasher = HighwayBuilder::new(Key(CHECKSUM_HW64_KEY));
@@ -621,14 +747,21 @@ fn read_entry<C>(r: &mut C, i_expected: Index) -> Result<Entry>
   let trailer_checksum = r.read_u64::<LittleEndian>()?;
   if checksum != trailer_checksum {
     let length = offset as u32 + 4 + 8;
-    return Err(ChecksumVerificationFailed {
-      at: position,
-      length,
-      expected: trailer_checksum,
-      actual: checksum,
-    });
+    return Err(ChecksumVerificationFailed { at: position, length, expected: trailer_checksum, actual: checksum });
   }
 
+  Ok(entry)
+}
+
+/// 指定されたカーソルの現在の位置から checksum による検証なしでエントリを読み込みます。正常終了時のカーソルの位置は
+/// 次のエントリの戦闘を指しています。
+fn read_entry_without_check_to_end<C>(r: &mut C, i_expected: Index) -> Result<Entry>
+where
+  C: io::Read + io::Seek,
+{
+  let position = r.stream_position()?;
+  let entry = read_entry_without_check(r, position, i_expected)?;
+  r.seek(SeekFrom::Current(4 /* offset */ + 8 /* checksum */))?;
   Ok(entry)
 }
 
@@ -721,19 +854,14 @@ fn write_entry(w: &mut dyn Write, e: &Entry) -> Result<usize> {
 /// 持つノードが含まれます。これはハッシュツリーからハッシュ付きで値を参照するための動作です。false を指定した場合は
 /// 長さ 0 の `Vec` を返します。
 ///
-fn search_entry_position<C>(
-  r: &mut C,
-  root: &INode,
-  i: Index,
-  with_branch: bool,
-) -> Result<Option<(u64, Vec<Node>)>>
-  where
-    C: io::Read + io::Seek,
+fn search_entry_position<C>(r: &mut C, root: &INode, i: Index, with_branch: bool) -> Result<Option<(u64, Vec<Node>)>>
+where
+  C: io::Read + io::Seek,
 {
   if root.node.address.i == i {
     // 指定されたルートノードが検索対象のノードの場合
     return Ok(Some((root.node.address.position, vec![])));
-  } else if i == 0 {
+  } else if i == 0 || i > root.node.address.i {
     // インデックス 0 の特殊値を持つノードは明示的に存在しない
     return Ok(None);
   }
@@ -742,10 +870,12 @@ fn search_entry_position<C>(
   let mut mover = root.clone();
   for _ in 0..INDEX_SIZE {
     // 次のノードのアドレスを参照
-    let (next, branch) = if i <= mover.left.i {
-      (mover.left, mover.right)
+    let next = if i <= mover.left.i {
+      read_branch(r, &mover.right, with_branch, &mut branches)?;
+      mover.left
     } else if i <= mover.node.address.i {
-      (mover.right, mover.left)
+      read_branch(r, &mover.left, with_branch, &mut branches)?;
+      mover.right
     } else {
       // 有効範囲外
       return Ok(None);
@@ -761,38 +891,41 @@ fn search_entry_position<C>(
       return Ok(None);
     }
 
-    fn read_inode<C>(r: &mut C, addr: &Address) -> Result<INode>
-      where
-        C: io::Read + io::Seek,
-    {
-      debug_assert_ne!(0, addr.j);
-      r.seek(io::SeekFrom::Start(addr.position))?;
-      let inodes = read_inodes(r, addr.position)?;
-      let inode = inodes.iter().find(|inode| inode.node.address.j == addr.j);
-      if let Some(inode) = inode {
-        Ok(inode.clone())
-      } else {
-        // 内部の木構造とストレージ上のデータが矛盾している
-        inconsistency(format!(
-          "entry i={} in storage doesn't contain an inode at specified level j={}",
-          addr.i, addr.j
-        ))
-      }
-    }
-
     // b_{i,*} の中間ノードをロードして次の中間ノードを取得
     mover = read_inode(r, &next)?;
+  }
 
+  fn read_inode<C>(r: &mut C, addr: &Address) -> Result<INode>
+  where
+    C: io::Read + io::Seek,
+  {
+    debug_assert_ne!(0, addr.j);
+    r.seek(io::SeekFrom::Start(addr.position))?;
+    let inodes = read_inodes(r, addr.position)?;
+    let inode = inodes.iter().find(|inode| inode.node.address.j == addr.j);
+    if let Some(inode) = inode {
+      Ok(inode.clone())
+    } else {
+      // 内部の木構造とストレージ上のデータが矛盾している
+      inconsistency(format!("entry i={} in storage doesn't contain an inode at specified level j={}", addr.i, addr.j))
+    }
+  }
+
+  fn read_branch<C>(r: &mut C, addr: &Address, with_branch: bool, branches: &mut Vec<Node>) -> Result<()>
+  where
+    C: io::Read + io::Seek,
+  {
     if with_branch {
-      let branch = if branch.j == 0 {
-        r.seek(io::SeekFrom::Start(branch.position))?;
-        let entry = read_entry_without_check(r, branch.position, branch.i)?;
+      let branch = if addr.j == 0 {
+        r.seek(io::SeekFrom::Start(addr.position))?;
+        let entry = read_entry_without_check(r, addr.position, addr.i)?;
         entry.enode.node
       } else {
-        read_inode(r, &branch)?.node
+        read_inode(r, &addr)?.node
       };
       branches.push(branch);
     }
+    Ok(())
   }
 
   // ストレージ上のデータのポインタが循環参照を起こしている
@@ -818,13 +951,13 @@ fn back_to_safety(cursor: &mut dyn Cursor, distance: u32, if_err: &'static str) 
 
 fn inconsistency<T>(msg: String) -> Result<T> {
   #[cfg(feature = "panic_over_inconsistency")]
-    {
-      panic!("{}", msg)
-    }
+  {
+    panic!("{}", msg)
+  }
   #[cfg(not(feature = "panic_over_inconsistency"))]
-    {
-      Err(InternalStateInconsistency { message: msg })
-    }
+  {
+    Err(InternalStateInconsistency { message: msg })
+  }
 }
 
 #[inline]

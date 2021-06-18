@@ -6,9 +6,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use highway::{HighwayBuilder, Key};
 
 use crate::checksum::HashRead;
-use crate::{
-  hex, is_version_compatible, Hash, Result, CHECKSUM_HW64_KEY, HASH_SIZE, STORAGE_IDENTIFIER,
-};
+use crate::{hex, is_version_compatible, Hash, Result, CHECKSUM_HW64_KEY, HASH_SIZE, STORAGE_IDENTIFIER};
 
 pub trait SeekRead: Seek + std::io::Read {}
 
@@ -18,18 +16,13 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
   cursor.seek(SeekFrom::Start(0))?;
 
   let eval = |f: bool| if f { '✔' } else { '❌' };
-  let eval_with_msg = |f: bool, msg: String| {
-    format!("{}{}", eval(f), if !f { format!("; {}", msg) } else { "".to_string() })
-  };
+  let eval_with_msg =
+    |f: bool, msg: String| format!("{}{}", eval(f), if !f { format!("; {}", msg) } else { "".to_string() });
 
   // 識別子の読み込み
   let mut identifier = [0u8; 4];
   cursor.read_exact(&mut identifier)?;
-  println!(
-    "IDENTIFIER: {} {}",
-    hex(&identifier[0..3]),
-    eval(identifier[0..3] == STORAGE_IDENTIFIER)
-  );
+  println!("IDENTIFIER: {} {}", hex(&identifier[0..3]), eval(identifier[0..3] == STORAGE_IDENTIFIER));
   println!(
     "VERSION   : {}.{} {}",
     identifier[3] >> 4,
@@ -124,18 +117,8 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
     } else {
       payload_hex
     };
-    println!(
-      "  PAYLOAD: {} ({} bytes) {}",
-      payload_hex,
-      payload.len(),
-      eval(payload_len == payload.len() as u32)
-    );
-    println!(
-      "  HASH   : {} ({} bytes) {}",
-      hex(&hash),
-      hash.len(),
-      eval(Hash::hash(&payload) == Hash::new(hash))
-    );
+    println!("  PAYLOAD: {} ({} bytes) {}", payload_hex, payload.len(), eval(payload_len == payload.len() as u32));
+    println!("  HASH   : {} ({} bytes) {}", hex(&hash), hash.len(), eval(Hash::hash(&payload) == Hash::new(hash)));
     println!("OFFSET   : {} {}", offset, eval(trailer_position - offset as u64 == position));
     println!("CHECKSUM : {} {}", hex(&checksum.to_le_bytes()), eval(checksum == actual_checksum));
   }
@@ -166,13 +149,7 @@ pub fn hex_dump(r: &mut dyn Read) -> Result<()> {
       ascii.push(" ".to_string());
       hex.push("  ".to_string());
     }
-    println!(
-      "{:08X}: {}  {}: {}",
-      line * 16,
-      hex[0..8].join(" "),
-      hex[8..16].join(" "),
-      ascii.join("")
-    );
+    println!("{:08X}: {}  {}: {}", line * 16, hex[0..8].join(" "), hex[8..16].join(" "), ascii.join(""));
     line += 1;
   }
 

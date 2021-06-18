@@ -97,9 +97,8 @@ fn test_generation_root() {
 #[test]
 fn test_generation_path_to() {
   let path = |i: u64, steps: Vec<((Index, u8), (Index, u8))>| -> Path {
-    let steps = steps.iter()
-      .map(|s| Step { step: Node::new(s.0.0, s.0.1), neighbor: Node::new(s.1.0, s.1.1) })
-      .collect();
+    let steps =
+      steps.iter().map(|s| Step { step: Node::new(s.0 .0, s.0 .1), neighbor: Node::new(s.1 .0, s.1 .1) }).collect();
     Path { root: Node::new(i, ceil_log2(i)), steps }
   };
   let mut cases = vec![
@@ -114,14 +113,40 @@ fn test_generation_path_to() {
     (13, (13, 3), path(13, vec![((13, 3), (8, 3))])),
     (13, (13, 0), path(13, vec![((13, 3), (8, 3)), ((13, 0), (12, 2))])),
   ];
-  cases.append(ns()
-    .map(|i| (i, (i, ceil_log2(i)), path(i, vec![])))
-    .collect::<Vec<(u64, (u64, u8), Path)>>().as_mut());
+  cases.append(ns().map(|i| (i, (i, ceil_log2(i)), path(i, vec![]))).collect::<Vec<(u64, (u64, u8), Path)>>().as_mut());
   for (n, (i, j), expected) in cases {
-    println!("{}: ({}, {})", n, i, j);
     let gen = Generation::new(n);
     let actual = gen.path_to(i, j).unwrap();
     assert_eq!(expected, actual)
+  }
+
+  // 範囲外の中間ノードを指定した場合
+  for (n, j) in vec![(1, 1), (1, 2), (2, 2), (3, 3), (4, 3)] {
+    let gen = Generation::new(n);
+    assert_eq!(None, gen.path_to(n, j));
+  }
+
+  // 存在しない一過性の中間ノードを指定した場合
+  for (n, j) in vec![
+    (3, 1),
+    (5, 1),
+    (5, 2),
+    (6, 2),
+    (7, 1),
+    (9, 1),
+    (9, 2),
+    (9, 3),
+    (10, 2),
+    (10, 3),
+    (11, 1),
+    (11, 3),
+    (13, 1),
+    (13, 2),
+    (14, 2),
+    (15, 1),
+  ] {
+    let gen = Generation::new(n);
+    assert_eq!(None, gen.path_to(n, j));
   }
 }
 
@@ -140,21 +165,8 @@ fn test_floor_and_ceil_log2() {
     rank + (if n == (1 << rank) { 0 } else { 1 })
   }
 
-  for x in vec![
-    1u64,
-    2,
-    3,
-    4,
-    5,
-    7,
-    8,
-    9,
-    0xFFFFFFFF,
-    0x100000000,
-    0x100000001,
-    0xFFFFFFFFFFFFFFFE,
-    0xFFFFFFFFFFFFFFFF,
-  ] {
+  for x in vec![1u64, 2, 3, 4, 5, 7, 8, 9, 0xFFFFFFFF, 0x100000000, 0x100000001, 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF]
+  {
     println!("floor(log₂ {}) = {}, ceil(log₂ {}) = {}", x, floor_log2(x), x, ceil_log2(x));
     assert_eq!(expected_floor(x), floor_log2(x));
     assert_eq!(expected_ceil(x), ceil_log2(x));
@@ -173,10 +185,10 @@ fn test_ceil_log2_with_zero() {
   ceil_log2(0);
 }
 
-fn ns() -> impl Iterator<Item=u64> {
-  (1u64..1024).chain(
-    (10..63).map(|i| vec![(1 << i) - 1, 1 << i, (1 << i) + 1]).flatten()
-  ).chain(
-    vec![u64::MAX - 2, u64::MAX - 1, u64::MAX]
-  )
+fn ns() -> impl Iterator<Item = u64> {
+  (1u64..1024).chain((10..63).map(|i| vec![(1 << i) - 1, 1 << i, (1 << i) + 1]).flatten()).chain(vec![
+    u64::MAX - 2,
+    u64::MAX - 1,
+    u64::MAX,
+  ])
 }
