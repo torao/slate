@@ -1,5 +1,47 @@
+//! `mvht` crate represents Multi-Versioned Hash Tree -- an implementation of a list structure
+//! with Hash Tree (Merkle Tree) that stores a complete history of additive changes in that tree
+//! structure, with efficient append characteristics for practical storage device. This allows
+//! data to be appended and, like a typical hash tree, can be used to verify data corruption or
+//! tampering with very small amounts of data.
+//!
+//! See also [my personal research page for more detail](https://hazm.at/mox/algorithm/structural-algorithm/mvht/index.html).
+//!
+//! # Examples
+//!
+//! ```rust
+//! use mvht::{MemStorage, MVHT, Value, Node};
+//! let mut db = MVHT::new(MemStorage::new()).unwrap();
+//!
+//! // Returns None for non-existent indices.
+//! assert_eq!(None, db.get(1).unwrap());
+//!
+//! // The first value is considered to index 1, and they are simply incremented thereafter.
+//! let first = "first".as_bytes();
+//! let root = db.append(first).unwrap();
+//! assert_eq!(1, root.i);
+//! assert_eq!(first, db.get(root.i).unwrap().unwrap());
+//!
+//! // Similar to the typical hash tree, you can refer to a verifiable value using root hash.
+//! let second = "second".as_bytes();
+//! let third = "third".as_bytes();
+//! db.append(second).unwrap();
+//! let root = db.append(third).unwrap();
+//! let values = db.get_values_with_hashes(2, 0).unwrap().unwrap();
+//! assert_eq!(1, values.values.len());
+//! assert_eq!(Value::new(2, second.to_vec()), values.values[0]);
+//! assert_eq!(Node::new(3, 2, root.hash), values.root());
+//!
+//! // By specifying `j` greater than 0, you can refer to contiguous values that belongs to
+//! // the binary subtree. The following refers to the values belonging to intermediate nodes b₂₁.
+//! let values = db.get_values_with_hashes(2, 1).unwrap().unwrap();
+//! assert_eq!(2, values.values.len());
+//! assert_eq!(Value::new(1, first.to_vec()), values.values[0]);
+//! assert_eq!(Value::new(2, second.to_vec()), values.values[1]);
+//! assert_eq!(Node::new(3, 2, root.hash), values.root());
+//! ```
+//!
 use std::cmp::min;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::fs::*;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -9,38 +51,45 @@ use std::sync::{Arc, LockResult, RwLock};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayBuilder, Key};
 
-use crate::algorithm::{range, Generation};
 use crate::checksum::{HashRead, HashWrite};
 use crate::error::Detail;
 use crate::error::Detail::*;
+use crate::model::{range, NthGenHashTree};
 
-pub(crate) mod algorithm;
 pub(crate) mod checksum;
 pub mod error;
 pub mod inspect;
+pub mod model;
 
 #[cfg(test)]
-mod test;
+pub mod test;
 
-/// MVHT クレートで使用する標準 Result。`error::Detail` も参照。
+/// mvht クレートで使用する標準 Result。[`error::Detail`] も参照。
 pub type Result<T> = std::result::Result<T, error::Detail>;
 
-/// MVHT の実体を保存する抽象化されたストレージ。read 用または read + write 用のカーソル参照を実装することで任意の
-/// デバイスに直列化することができます。
+/// ハッシュ木を保存する抽象化されたストレージです。read 用または read + write 用のカーソル参照を実装することで
+/// 任意のデバイスに直列化することができます。
 pub trait Storage {
   /// このストレージに対する read または read + write 用のカーソルを作成します。
   fn open(&self, writable: bool) -> Result<Box<dyn Cursor>>;
 }
 
-/// ローカルファイルシステムのパスをストレージとして使用するための実装です。
-impl Storage for dyn AsRef<Path> {
+/// ローカルファイルシステムのパスをストレージとして使用する実装です。
+impl<P: AsRef<Path>> Storage for P {
   fn open(&self, writable: bool) -> Result<Box<dyn Cursor>> {
-    Ok(Box::new(OpenOptions::new().write(writable).read(true).open(self)?))
+    let file = OpenOptions::new().read(true).write(writable).create(writable).open(self);
+    match file {
+      Ok(file) => Ok(Box::new(file)),
+      Err(err) => Err(Detail::FailedToOpenLocalFile {
+        file: self.as_ref().to_str().map(|s| s.to_string()).unwrap_or(self.as_ref().to_string_lossy().to_string()),
+        message: err.to_string(),
+      }),
+    }
   }
 }
 
-/// メモリ上の領域をストレージとして使用するための実装です。`drop()` された時点で記録していた内容が消滅するため
-/// 調査やテストでの使用を想定しています。
+/// メモリ上の領域をストレージとして使用する実装です。`drop()` された時点で記録していた内容が消滅するためテストや
+/// 調査での使用を想定しています。
 pub struct MemStorage {
   buffer: Arc<RwLock<Vec<u8>>>,
 }
@@ -127,81 +176,116 @@ pub trait Cursor: io::Seek + io::Read + io::Write {}
 
 impl Cursor for File {}
 
-pub type Index = algorithm::Index;
+/// MVHT がインデックス i として使用する整数の型です。`u64` を表しています。
+///
+/// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
+/// ことができます。
+///
+pub type Index = model::Index;
 
-pub const INDEX_SIZE: u8 = algorithm::INDEX_SIZE;
+/// [`Index`] 型のビット幅を表す定数です。64 を表しています。
+///
+/// コンパイル時に `small_index` feature を指定することでこの定数は 32 となります。
+///
+pub const INDEX_SIZE: u8 = model::INDEX_SIZE;
 
-/// 目的のノードへの経路から分岐するハッシュ値付きのノードを表します。
-#[derive(PartialEq, Eq, Copy, Clone)]
-pub struct Branch {
+/// ハッシュ木を構成するノードを表します。
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+pub struct Node {
+  /// このノードのインデックス。
   pub i: Index,
+  /// このノードの高さ。
   pub j: u8,
+  /// このノードのハッシュ値。この値は [`Hash::hash()`] によって算出されています。
   pub hash: Hash,
 }
 
-impl Branch {
-  pub fn new(i: Index, j: u8, hash: Hash) -> Branch {
-    Branch { i, j, hash }
+impl Node {
+  pub fn new(i: Index, j: u8, hash: Hash) -> Node {
+    Node { i, j, hash }
   }
-  fn for_node(node: &Node) -> Branch {
+  fn for_node(node: &MetaInfo) -> Node {
     Self::new(node.address.i, node.address.j, node.hash.clone())
+  }
+
+  /// このノードを左枝、`right` ノードを右枝とする親ノードを算出します。
+  pub fn parent(&self, right: &Node) -> Node {
+    debug_assert!(self.i < right.i);
+    debug_assert!(self.j >= right.j);
+    let i = right.i;
+    let j = self.j + 1;
+    let hash = self.hash.combine(&right.hash);
+    Node::new(i, j, hash)
   }
 }
 
-impl Debug for Branch {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+impl Display for Node {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     f.write_str(&format!("{},{}:{}", self.i, self.j, hex(&self.hash.value)))
   }
 }
 
-/// HashTree から取得した値を表します。
-#[derive(PartialEq, Eq)]
+/// ハッシュ木に保存されている値を参照します。
+#[derive(PartialEq, Eq, Debug)]
 pub struct Value {
+  /// この値のインデックス。
   pub i: Index,
+  /// この値のバイナリ値。
   pub value: Vec<u8>,
 }
 
-impl Debug for Value {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+impl Value {
+  pub fn new(i: Index, value: Vec<u8>) -> Value {
+    Value { i, value }
+  }
+  /// この値のハッシュ値を算出します。
+  pub fn hash(&self) -> Hash {
+    Hash::hash(&self.value)
+  }
+  pub fn to_node(&self) -> Node {
+    Node::new(self.i, 0u8, self.hash())
+  }
+}
+
+impl Display for Value {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     f.write_str(&format!("{}:{}", self.i, hex(&self.value)))
   }
 }
 
-/// ハッシュツリーからハッシュ値付きで返される値
+/// ハッシュ木から取得した、経路の分岐先のハッシュ値を含む値のセットです。値のハッシュ値と分岐ノードのハッシュ値から
+/// ルートハッシュを算出し、クライアントが持つルートハッシュと比較することで、取得した値が改変されていないことを検証
+/// することができます。
 #[derive(Debug)]
-pub struct DataSet {
-  values: Vec<Value>,
-  branches: Vec<Branch>,
+pub struct ValuesWithBranches {
+  pub values: Vec<Value>,
+  pub branches: Vec<Node>,
 }
 
-impl DataSet {
-  pub fn new(values: Vec<Value>, branches: Vec<Branch>) -> DataSet {
+impl ValuesWithBranches {
+  pub fn new(values: Vec<Value>, branches: Vec<Node>) -> ValuesWithBranches {
     // values は連続していなければならない
     #[cfg(debug_assertions)]
     for i in 0..values.len() - 1 {
       debug_assert_eq!(values[i].i + 1, values[i + 1].i);
     }
-    DataSet { values, branches }
+    ValuesWithBranches { values, branches }
   }
 
-  pub fn root_hash(&self) -> Hash {
-    let mut hashes = self
-      .values
-      .iter()
-      .map(|value| Branch { i: value.i, j: 0u8, hash: Hash::hash(&value.value) })
-      .collect::<Vec<Branch>>();
+  /// この結果から得られるルートノードをルートハッシュ付きで算出します。
+  pub fn root(&self) -> Node {
+    // すべての値をハッシュ値に変換する
+    let mut hashes = self.values.iter().map(|value| value.to_node()).collect::<Vec<Node>>();
+
+    // 値から算出したハッシュ値を折りたたむ
     while hashes.len() > 1 {
-      // hashes の要素数が奇数の場合は最も右もノードが一過性の中間ノードに属する
+      // hashes の要素を 2 つ一組で折りたたむ (要素数が奇数の場合は最も右もノードが一過性の中間ノード)
       for k in 0..hashes.len() / 2 {
         let left = &hashes[k * 2];
         let right = &hashes[k * 2 + 1];
-        debug_assert!(left.j >= right.j);
-        let i = right.i;
-        let j = left.j + 1;
-        let hash = left.hash.combine(&right.hash);
-        hashes[k] = Branch { i, j, hash };
+        hashes[k] = left.parent(&right);
       }
-      // 結合されていない一過性の中間ノードを次に残す
+      // 折りたたまれていない一過性の中間ノードは次に持ち越す
       let fraction = if hashes.len() % 2 != 0 {
         let len = hashes.len();
         hashes[len / 2] = hashes.pop().unwrap();
@@ -211,21 +295,22 @@ impl DataSet {
       };
       hashes.truncate(hashes.len() / 2 + fraction);
     }
+
+    // 経路から分岐したノードのハッシュ値と統合しルートノードを算出する
     let mut folding = hashes.remove(0);
     for k in 0..self.branches.len() {
       let branch = &self.branches[self.branches.len() - k - 1];
       let (left, right) = if folding.i < branch.i { (&folding, branch) } else { (branch, &folding) };
-      let i = right.i;
-      let j = left.j + 1;
-      let hash = left.hash.combine(&right.hash);
-      folding = Branch { i, j, hash };
+      folding = left.parent(&right);
     }
-    folding.hash
+    folding
   }
 }
 
 // --------------------------------------------------------------------------
 
+/// [`Hash::hash()`] によって得られるハッシュ値のバイトサイズを表す定数です。デフォルトの `feature = "sha256"`
+/// ビルドでは 32 を表します。
 pub const HASH_SIZE: usize = {
   #[cfg(feature = "highwayhash64")]
   {
@@ -245,6 +330,7 @@ pub const HASH_SIZE: usize = {
   }
 };
 
+/// ハッシュ木が使用するハッシュ値です。
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub struct Hash {
   pub value: [u8; HASH_SIZE],
@@ -254,6 +340,8 @@ impl Hash {
   pub fn new(hash: [u8; HASH_SIZE]) -> Hash {
     Hash { value: hash }
   }
+
+  /// 指定された値をハッシュ化します。
   pub fn hash(value: &[u8]) -> Hash {
     #[cfg(feature = "highwayhash64")]
     {
@@ -283,6 +371,7 @@ impl Hash {
     }
   }
 
+  /// 指定されたハッシュ値と連結したハッシュ値 `hash(self.hash || other.hash)` を算出します。
   pub fn combine(&self, other: &Hash) -> Hash {
     let mut value = [0u8; HASH_SIZE * 2];
     value[..HASH_SIZE].copy_from_slice(&self.value);
@@ -295,13 +384,15 @@ impl Hash {
   }
 }
 
+/// ノード b_{i,j} を含むエントリがストレージ上のどこに位置するかを表します。
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 struct Address {
-  /// MVHT のリスト構造上での位置。1 から開始します。
+  /// ハッシュ木のリスト構造上での位置。1 から開始し [`Index`] の最大値までの値を取ります。
   pub i: Index,
-  /// このノードの高さ (最も遠い葉ノードまでの距離)。0 の場合、ノードが葉ノードであることを示しています。
+  /// このノードの高さ (最も遠い葉ノードまでの距離)。0 の場合、ノードが葉ノードであることを示しています。最大値は
+  /// [`INDEX_SIZE`] です。
   pub j: u8,
-  /// このノードが格納されているエントリの位置です。
+  /// このノードが格納されているエントリのストレージ先頭からの位置です。
   pub position: u64,
 }
 
@@ -311,27 +402,29 @@ impl Address {
   }
 }
 
-#[derive(PartialEq, Eq, Copy, Clone)]
-struct Node {
+/// ハッシュ値を含む、ノード b_{i,j} の属性情報を表します。
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+struct MetaInfo {
   pub address: Address,
   pub hash: Hash,
 }
 
-impl Node {
-  pub fn new(address: Address, hash: Hash) -> Node {
-    Node { address, hash }
+impl MetaInfo {
+  pub fn new(address: Address, hash: Hash) -> MetaInfo {
+    MetaInfo { address, hash }
   }
 }
 
-impl Debug for Node {
+impl Display for MetaInfo {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     f.write_str(&format!("Node({},{}@{}){}", self.address.i, self.address.j, self.address.position, self.hash.to_str()))
   }
 }
 
+/// 左右の枝を持つ中間ノードを表します。
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 struct INode {
-  pub node: Node,
+  pub meta: MetaInfo,
   /// 左枝のノード
   pub left: Address,
   /// 右枝のノード
@@ -339,14 +432,15 @@ struct INode {
 }
 
 impl INode {
-  pub fn new(node: Node, left: Address, right: Address) -> INode {
-    INode { node, left, right }
+  pub fn new(meta: MetaInfo, left: Address, right: Address) -> INode {
+    INode { meta, left, right }
   }
 }
 
+/// 値を持つ葉ノードを表します。
 #[derive(PartialEq, Eq, Debug)]
 struct ENode {
-  pub node: Node,
+  pub meta: MetaInfo,
   pub payload: Vec<u8>,
 }
 
@@ -368,23 +462,27 @@ struct Entry {
 /// HighwayHash でチェックサム用のハッシュ値を生成するためのキー (256-bit 固定値)。
 const CHECKSUM_HW64_KEY: [u64; 4] = [0xFA5015F2E22BCFC6u64, 0xCE5A4ED9A4025C80, 0x16B9731717F6315E, 0x0F34D06AE93BD8E9];
 
-/// ペイロードの最大サイズ。トレイラーの offset 値を u32 にするためにはエントリの直列化表現を最大でも `u32::MAX`
-/// とする必要があります。したがって任意帳のペイロードは 2GB までとします。
-/// この定数はビットマスクとしても使用するため 1-bit の連続で構成されている必要があります。
+/// ペイロード (値) の最大バイトサイズを表す定数です。2GB (2,147,483,647 bytes) を表します。
+///
+/// トレイラーの offset 値を u32 にするためにはエントリの直列化表現を最大でも `u32::MAX` とする必要があります。
+/// したがって任意帳のペイロードは 2GB までとします。この定数はビットマスクとしても使用するため 1-bit の連続で
+/// 構成されている必要があります。
+///
 pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
 
-/// この実装のバージョン
-const STORAGE_MAJOR_VERSION: u8 = 0u8;
-const STORAGE_MINOR_VERSION: u8 = 0u8;
-pub const STORAGE_VERSION: u8 = (STORAGE_MAJOR_VERSION << 4) | (STORAGE_MINOR_VERSION & 0x0F);
-
-fn is_version_compatible(version: u8) -> bool {
-  version >> 4 == STORAGE_MAJOR_VERSION && (STORAGE_MAJOR_VERSION != 0 || version & 0x0F == STORAGE_MINOR_VERSION)
-}
-
-/// MVHT ファイルの先頭に記録される識別子
+/// MVHT ファイルの先頭に記録される 3 バイトの識別子を表す定数です。値は Unicode でのdeciduous tree 🌲 (U+1F332)
+/// に由来します。
 pub const STORAGE_IDENTIFIER: [u8; 3] = [0x01u8, 0xF3, 0x33];
 
+/// 識別子に続いて配置される、この実装におけるストレージフォーマットのバージョンです。現在は 1 を使用します。
+pub const STORAGE_VERSION: u8 = 1;
+
+/// 使用しようとしているストレージと互換性があるかを確認します。
+fn is_version_compatible(version: u8) -> bool {
+  version <= STORAGE_VERSION
+}
+
+/// ストレージ上に直列化された Multi-Versioned Hash Tree を表す木構造に対する操作を実装します。
 pub struct MVHT<S: Storage> {
   storage: Box<S>,
   cursor: Box<dyn Cursor>,
@@ -392,7 +490,34 @@ pub struct MVHT<S: Storage> {
 }
 
 impl<S: Storage> MVHT<S> {
-  /// 指定されたストレージをデータベースとして使用します。
+  /// 指定された [`Storage`] に直列化されたハッシュ木を保存する MVHT を構築します。
+  ///
+  /// ストレージに [`std::path::Path`] や [`std::path::PathBuf`] のようなパスを指定したするとそのファイルに
+  /// 直列化されたハッシュ木を保存します。テストや検証目的ではメモリ上にハッシュ木を直列化する [`MemStorage`] を
+  /// 使用することができます。ストレージは抽象化されているため独自の [`Storage`] 実装を使用することができます。
+  ///
+  /// # Examples
+  ///
+  /// 以下はシステムのテンポラリディレクトリ上の `mbht-example.db` にハッシュ木を直列化する例です。
+  ///
+  /// ```rust
+  /// use mvht::{MVHT,Storage,Result};
+  /// use std::env::temp_dir;
+  /// use std::fs::remove_file;
+  /// use std::path::PathBuf;
+  ///
+  /// fn append_and_get(file: &PathBuf) -> Result<()>{
+  ///   let mut db = MVHT::new(file)?;
+  ///   let root = db.append(&vec![0u8, 1, 2, 3])?;
+  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.get(root.i)?);
+  ///   Ok(())
+  /// }
+  ///
+  /// let mut path = temp_dir();
+  /// path.push("mvht-example.db");
+  /// append_and_get(&path).expect("test failed");
+  /// remove_file(path.as_path()).unwrap();
+  /// ```
   pub fn new(storage: S) -> Result<MVHT<S>> {
     let cursor = storage.open(true)?;
     let mut db = MVHT { storage: Box::new(storage), cursor, last: None };
@@ -400,7 +525,36 @@ impl<S: Storage> MVHT<S> {
     Ok(db)
   }
 
-  fn root<'a>(&self) -> RootRef {
+  /// 現在の木構造のルートノードを参照します。
+  pub fn root(&self) -> Option<Node> {
+    (match &self.root_ref() {
+      RootRef::INode(inode) => Some(inode.meta),
+      RootRef::ENode(enode) => Some(enode.meta),
+      RootRef::None => None,
+    })
+    .map(|root| Node::new(root.address.i, root.address.j, root.hash))
+  }
+
+  /// 木構造の現在の世代 (リストとして何個の要素を保持しているか) を返します。
+  pub fn n(&self) -> Index {
+    self.root().map(|root| root.i).unwrap_or(0)
+  }
+
+  /// この MVHT の現在の高さを参照します。一つのノードも含まれていない場合は 0 を返します。
+  pub fn height(&self) -> u8 {
+    self.root().map(|root| root.j).unwrap_or(0)
+  }
+
+  /// この MVHT のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
+  pub fn root_hash(&self) -> Option<Hash> {
+    self.root().map(|root| root.hash)
+  }
+
+  pub fn storage(&self) -> &dyn Storage {
+    self.storage.as_ref()
+  }
+
+  fn root_ref<'a>(&self) -> RootRef {
     match &self.last {
       None => RootRef::None,
       Some(entry) => match entry.inodes.last() {
@@ -455,54 +609,32 @@ impl<S: Storage> MVHT<S> {
     Ok(())
   }
 
-  pub fn n(&self) -> Index {
-    match &self.root() {
-      RootRef::INode(inode) => inode.node.address.i,
-      RootRef::ENode(enode) => enode.node.address.i,
-      RootRef::None => 0,
-    }
-  }
-
-  /// この MVHT の現在の高さを参照します。一つのノードも含まれていない場合は 0 を返します。
-  pub fn height(&self) -> u8 {
-    match &self.root() {
-      RootRef::INode(inode) => inode.node.address.j,
-      RootRef::ENode(enode) => enode.node.address.j,
-      RootRef::None => 0,
-    }
-  }
-
-  /// この MVHT のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
-  pub fn root_hash(&self) -> Option<Hash> {
-    match &self.root() {
-      RootRef::INode(inode) => Some(inode.node.hash),
-      RootRef::ENode(enode) => Some(enode.node.hash),
-      RootRef::None => None,
-    }
-  }
-
   /// 指定された値をこの MVHT に追加します。
-  /// 追加された要素のインデックスとその時点のハッシュツリーのルートハッシュを返します。
-  pub fn append(&mut self, value: &[u8]) -> Result<(Index, Hash)> {
+  ///
+  /// # Returns
+  /// この操作によって更新されたルートノードを返します。このルートノードは新しい木構造のルートハッシュである
+  /// `hash` に加えて、ハッシュ木に含まれる要素数 `i`、ハッシュ木の高さ `j` を持ちます。
+  ///
+  pub fn append(&mut self, value: &[u8]) -> Result<Node> {
     if value.len() > MAX_PAYLOAD_SIZE {
       return Err(TooLargePayload { size: value.len() });
     }
 
     // 葉ノードの構築
     let position = self.cursor.stream_position()?;
-    let i = match self.root() {
+    let i = match self.root_ref() {
       RootRef::None => 1,
-      RootRef::ENode(enode) => enode.node.address.i + 1,
-      RootRef::INode(inode) => inode.node.address.i + 1,
+      RootRef::ENode(enode) => enode.meta.address.i + 1,
+      RootRef::INode(inode) => inode.meta.address.i + 1,
     };
     let hash = Hash::hash(value);
-    let enode = ENode { node: Node::new(Address::new(i, 0, position), hash), payload: Vec::from(value) };
+    let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), hash), payload: Vec::from(value) };
 
     // 中間ノードの構築
     let mut cursor = self.storage.open(false)?;
     let mut inodes = Vec::<INode>::with_capacity(INDEX_SIZE as usize);
-    let mut right_hash = enode.node.hash;
-    let gen = Generation::new(i);
+    let mut right_hash = enode.meta.hash;
+    let gen = NthGenHashTree::new(i);
     let mut right_to_left_inodes = gen.inodes();
     right_to_left_inodes.reverse();
     for n in right_to_left_inodes.iter() {
@@ -513,7 +645,7 @@ impl<S: Storage> MVHT<S> {
       if let Some(left) = self.get_node(&mut cursor, n.left.i, n.left.j)? {
         let right = Address::new(n.right.i, n.right.j, position);
         let hash = left.hash.combine(&right_hash);
-        let node = Node::new(Address::new(n.node.i, n.node.j, position), hash);
+        let node = MetaInfo::new(Address::new(n.node.i, n.node.j, position), hash);
         let inode = INode::new(node, left.address, right);
         inodes.push(inode);
         right_hash = hash;
@@ -523,12 +655,16 @@ impl<S: Storage> MVHT<S> {
       }
     }
 
+    // 返値のための高さとルートハッシュを取得
+    let (j, root_hash) =
+      if let Some(inode) = inodes.last() { (inode.meta.address.j, inode.meta.hash) } else { (0u8, enode.meta.hash) };
+
     // エントリを書き込んで状態を更新
     let entry = Entry { enode, inodes };
     write_entry(&mut self.cursor, &entry)?;
     self.last = Some(entry);
 
-    Ok((i, hash))
+    Ok(Node::new(i, j, root_hash))
   }
 
   /// 範囲外のインデックス (0 を含む) を指定した場合は `None` を返します。
@@ -545,39 +681,70 @@ impl<S: Storage> MVHT<S> {
     }
   }
 
-  pub fn get_with_hashes(&self, _i: Index) -> Result<Option<(Vec<u8>, Vec<Hash>)>> {
-    todo!()
+  /// 葉ノード b_i の値を中間ノードのハッシュ値付きで取得します。
+  #[inline]
+  pub fn get_with_hashes(&self, i: Index) -> Result<Option<ValuesWithBranches>> {
+    self.get_values_with_hashes(i, 0)
   }
 
-  /// 指定されたノード b_{i,j} に属しているすべての値を中間ノードのハッシュ値付きで取得します。
-  /// 範囲外のインデックス (0 を含む) を指定した場合は `None` を返します。
-  pub fn get_values_with_hashes(&self, i: Index, j: u8) -> Result<Option<DataSet>> {
+  /// 指定されたノード b_{i,j} をルートとする部分木に含まれているすべての値 (葉ノード) を中間ノードのハッシュ値
+  /// 付きで取得します。この結果から算出されるルートハッシュを使用して、値のデータが破損や改ざんされていないことを
+  /// 検証することができます。
+  ///
+  /// # Returns
+  /// 返値には範囲に含まれる 1 個以上の値と、b_{i,j} への経路から分岐したノードが含まれています。ここで得られる
+  /// 値の範囲は [model::range(i,j)](range) を使って算出することができます。b_{i,j} をルートとする
+  /// [部分木が完全二分木](model::is_pbst) の場合、返値の数は `1 << j` 個になります。完全二分木でない場合は
+  /// `1 << j` より少ない個数となります。
+  ///
+  /// `i` に 0 を含む範囲外のインデックスを指定した場合は `None` を返します。
+  ///
+  /// # Example
+  /// ```rust
+  /// use mvht::{MVHT, MemStorage, Hash};
+  /// use mvht::model::{range, is_pbst};
+  ///
+  /// let mut db = MVHT::new(MemStorage::new()).unwrap();
+  /// let mut latest_root_hash = Hash::hash(&vec![]);
+  /// for i in 0u32..100 {
+  ///   let current_root = db.append(&i.to_le_bytes()).unwrap();
+  ///   latest_root_hash = current_root.hash;
+  /// }
+  /// let values = db.get_values_with_hashes(40, 3).unwrap().unwrap();
+  /// assert!(is_pbst(40, 3));
+  /// assert_eq!(1 << 3, values.values.len());
+  /// assert_eq!(*range(40, 3).start(), values.values[0].i);
+  /// assert_eq!(*range(40, 3).end(), values.values[(1 << 3) - 1].i);
+  /// assert_eq!(latest_root_hash, values.root().hash);
+  /// ```
+  ///
+  pub fn get_values_with_hashes(&self, i: Index, j: u8) -> Result<Option<ValuesWithBranches>> {
     if i == 0 || i > self.n() {
       return Ok(None);
     }
     let mut cursor = self.storage.open(false)?;
-    let root = match self.root() {
+    let root = match self.root_ref() {
       RootRef::INode(inode) => *inode,
       RootRef::ENode(enode) => {
-        cursor.seek(SeekFrom::Start(enode.node.address.position))?;
+        cursor.seek(SeekFrom::Start(enode.meta.address.position))?;
         let Entry { enode: ENode { payload, .. }, .. } =
-          read_entry_without_check(&mut cursor, enode.node.address.position, i)?;
-        return Ok(Some(DataSet { values: vec![Value { i, value: payload }], branches: vec![] }));
+          read_entry_without_check(&mut cursor, enode.meta.address.position, i)?;
+        return Ok(Some(ValuesWithBranches { values: vec![Value { i, value: payload }], branches: vec![] }));
       }
       RootRef::None => return Ok(None),
     };
-    let gen = Generation::new(root.node.address.i);
+    let gen = NthGenHashTree::new(root.meta.address.i);
     let path = match gen.path_to(i, j) {
       Some(path) => path,
       None => return Ok(None),
     };
-    debug_assert_eq!(gen.root().i, root.node.address.i);
-    debug_assert_eq!(gen.root().j, root.node.address.j);
+    debug_assert_eq!(gen.root().i, root.meta.address.i);
+    debug_assert_eq!(gen.root().j, root.meta.address.j);
 
     // 目的のノードまで経路を移動しながら分岐のハッシュ値を取得する
     let mut prev = root;
     let mut inodes = self.last.as_ref().map(|l| l.inodes.clone()).unwrap();
-    let mut branches = Vec::<Branch>::with_capacity(INDEX_SIZE as usize);
+    let mut branches = Vec::<Node>::with_capacity(INDEX_SIZE as usize);
     for step in path.steps.iter().map(|s| s.step) {
       // 左枝側のエントリの INode を読み込み (右枝側のノードは inodes に含まれている)
       cursor.seek(SeekFrom::Start(prev.left.position))?;
@@ -594,11 +761,11 @@ impl<S: Storage> MVHT<S> {
       // 分岐したノードのハッシュ値付きの情報を保存
       if branch.j > 0 {
         // INode として分岐したノードを参照して保存
-        if let Some(inode) = branch_inodes.iter().find(|n| n.node.address.j == branch.j) {
-          debug_assert!(inode.node.address == *branch);
-          branches.push(Branch::for_node(&inode.node));
+        if let Some(inode) = branch_inodes.iter().find(|n| n.meta.address.j == branch.j) {
+          debug_assert!(inode.meta.address == *branch);
+          branches.push(Node::for_node(&inode.meta));
         } else {
-          panic!(
+          return inconsistency(format!(
             "in searching for b_{{{},{}}} in T_{}, branch inode b_{{{}, {}}} isn't included in {:?}",
             i,
             j,
@@ -606,13 +773,13 @@ impl<S: Storage> MVHT<S> {
             branch.i,
             branch.j,
             branch_inodes
-          );
+          ));
         }
       } else {
         // ENode として分岐したノードを読み込んで保存
         cursor.seek(SeekFrom::Start(branch.position))?;
         let entry = read_entry_without_check(&mut cursor, branch.position, branch.i)?;
-        branches.push(Branch::for_node(&entry.enode.node));
+        branches.push(Node::for_node(&entry.enode.meta));
       }
 
       if next.j == 0 {
@@ -620,35 +787,35 @@ impl<S: Storage> MVHT<S> {
         cursor.seek(SeekFrom::Start(next.position))?;
         let Entry { enode: ENode { payload, .. }, .. } = read_entry_without_check(&mut cursor, next.position, next.i)?;
         let values = vec![Value { i: next.i, value: payload }];
-        return Ok(Some(DataSet::new(values, branches)));
+        return Ok(Some(ValuesWithBranches::new(values, branches)));
       }
 
       // 次のノードに移動
-      if let Some(inode) = next_inodes.iter().find(|node| node.node.address == *next) {
+      if let Some(inode) = next_inodes.iter().find(|node| node.meta.address == *next) {
         prev = *inode;
         inodes = next_inodes;
       } else {
-        panic!(
+        return inconsistency(format!(
           "in searching for ({},{}), the inode ({}, {}) on the route isn't included in {:?}",
           i, j, next.i, next.j, next_inodes
-        );
+        ));
       }
     }
 
     // 目的のノードに含まれている値を取得する
     let values = self.get_values_belonging_to(&mut cursor, &prev)?;
-    Ok(Some(DataSet::new(values, branches)))
+    Ok(Some(ValuesWithBranches::new(values, branches)))
   }
 
-  fn get_node(&self, cursor: &mut Box<dyn Cursor>, i: Index, j: u8) -> Result<Option<Node>> {
+  fn get_node(&self, cursor: &mut Box<dyn Cursor>, i: Index, j: u8) -> Result<Option<MetaInfo>> {
     if let Some((position, _)) = self.get_entry_position(cursor, i, false)? {
       cursor.seek(io::SeekFrom::Start(position))?;
       if j == 0 {
         let entry = read_entry_without_check(cursor, position, i)?;
-        Ok(Some(entry.enode.node))
+        Ok(Some(entry.enode.meta))
       } else {
         let inodes = read_inodes(cursor, position)?;
-        Ok(inodes.iter().find(|inode| inode.node.address.j == j).map(|inode| inode.node))
+        Ok(inodes.iter().find(|inode| inode.meta.address.j == j).map(|inode| inode.meta))
       }
     } else {
       Ok(None)
@@ -663,19 +830,19 @@ impl<S: Storage> MVHT<S> {
     while mover.left.j > 0 {
       cursor.seek(SeekFrom::Start(mover.left.position))?;
       let inodes = read_inodes(cursor, mover.left.position)?;
-      mover = match inodes.iter().find(|node| node.node.address.j == mover.left.j) {
+      mover = match inodes.iter().find(|node| node.meta.address.j == mover.left.j) {
         Some(inode) => *inode,
         None => panic!(),
       };
     }
 
-    let range = range(inode.node.address.i, inode.node.address.j);
+    let range = range(inode.meta.address.i, inode.meta.address.j);
     let (i0, i1) = (*range.start(), *range.end());
     let mut values = Vec::<Value>::with_capacity((i1 - i0) as usize);
     let mut i = mover.left.i;
     cursor.seek(SeekFrom::Start(mover.left.position))?;
     while i <= i1 {
-      let Entry { enode: ENode { node, payload }, .. } = read_entry_without_check_to_end(cursor, i)?;
+      let Entry { enode: ENode { meta: node, payload }, .. } = read_entry_without_check_to_end(cursor, i)?;
       debug_assert!(node.address.i == i);
       values.push(Value { i, value: payload });
       i += 1;
@@ -689,40 +856,17 @@ impl<S: Storage> MVHT<S> {
     cursor: &mut Box<dyn Cursor>,
     i: Index,
     with_branch: bool,
-  ) -> Result<Option<(Index, Vec<Node>)>> {
-    match &self.root() {
+  ) -> Result<Option<(Index, Vec<MetaInfo>)>> {
+    match &self.root_ref() {
       RootRef::INode(root) => {
         let root = (*root).clone();
         search_entry_position(cursor, &root, i, with_branch)
       }
-      RootRef::ENode(root) if root.node.address.i == i => Ok(Some((root.node.address.position, vec![]))),
+      RootRef::ENode(root) if root.meta.address.i == i => Ok(Some((root.meta.address.position, vec![]))),
       _ => Ok(None),
     }
   }
 }
-//
-// pub struct Session {
-//   cursor: Box<dyn Cursor>,
-//   generation: Generation,
-// }
-//
-// impl Session {
-/*
-/// `i` 番目のエントリの位置を参照します。この検索は現在のルートノードを基準にした探索を行います。
-fn get_entry_position(&self, i: Index) -> Result<Option<u64>> {
-  match &self.root() {
-    Root::INode(root) => {
-      let root = (*root).clone();
-      search_entry_position(cursor, &root, i, false)
-    }
-    Root::ENode(root) if root.node.address.i == i => {
-      Ok(Some(root.node.address.position))
-    }
-    _ => Ok(None),
-  }
-}
- */
-// }
 
 /// 指定されたカーソルの現在の位置からエントリを読み込みます。
 /// 正常終了時のカーソルは次のエントリを指しています。
@@ -772,7 +916,7 @@ fn read_entry_without_check(r: &mut dyn io::Read, position: u64, i_expected: Ind
 
   // 中間ノードの読み込み
   let inodes = read_inodes(r, position)?;
-  let i = inodes.first().map(|inode| inode.node.address.i).unwrap_or(1);
+  let i = inodes.first().map(|inode| inode.meta.address.i).unwrap_or(1);
   if i != i_expected && i_expected != 0 {
     return Err(Detail::IncorrectNodeBoundary { at: position });
   }
@@ -783,7 +927,7 @@ fn read_entry_without_check(r: &mut dyn io::Read, position: u64, i_expected: Ind
   unsafe { payload.set_len(payload_size as usize) };
   r.read_exact(&mut payload)?;
   r.read_exact(&mut hash)?;
-  let enode = ENode { node: Node::new(Address::new(i, 0, position), Hash::new(hash)), payload };
+  let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), Hash::new(hash)), payload };
 
   Ok(Entry { enode, inodes })
 }
@@ -803,7 +947,7 @@ fn read_inodes(r: &mut dyn io::Read, position: u64) -> Result<Vec<INode>> {
     let left_j = r.read_u8()?;
     r.read_exact(&mut hash)?;
     inodes.push(INode {
-      node: Node::new(Address::new(i, j, position), Hash::new(hash)),
+      meta: MetaInfo::new(Address::new(i, j, position), Hash::new(hash)),
       left: Address::new(left_i, left_j, left_position),
       right: Address::new(i, right_j, position),
     });
@@ -822,21 +966,21 @@ fn write_entry(w: &mut dyn Write, e: &Entry) -> Result<usize> {
   let mut w = HashWrite::new(w, &mut hasher);
 
   // 中間ノードの書き込み
-  w.write_u64::<LittleEndian>(e.enode.node.address.i)?;
+  w.write_u64::<LittleEndian>(e.enode.meta.address.i)?;
   w.write_u8(e.inodes.len() as u8)?;
   for i in &e.inodes {
-    debug_assert_eq!((i.node.address.j - 1) & (INDEX_SIZE - 1), i.node.address.j - 1);
-    w.write_u8((i.node.address.j - 1) & (INDEX_SIZE - 1))?; // 下位 6-bit のみ保存
+    debug_assert_eq!((i.meta.address.j - 1) & (INDEX_SIZE - 1), i.meta.address.j - 1);
+    w.write_u8((i.meta.address.j - 1) & (INDEX_SIZE - 1))?; // 下位 6-bit のみ保存
     w.write_u64::<LittleEndian>(i.left.position)?;
     w.write_u64::<LittleEndian>(i.left.i)?;
     w.write_u8(i.left.j)?;
-    w.write_all(&i.node.hash.value)?;
+    w.write_all(&i.meta.hash.value)?;
   }
 
   // 葉ノードの書き込み
   w.write_u32::<LittleEndian>(e.enode.payload.len() as u32)?;
   w.write_all(&e.enode.payload)?;
-  w.write_all(&e.enode.node.hash.value)?;
+  w.write_all(&e.enode.meta.hash.value)?;
 
   // エントリ先頭までのオフセットを書き込み
   w.write_u32::<LittleEndian>(w.length() as u32)?;
@@ -854,26 +998,31 @@ fn write_entry(w: &mut dyn Write, e: &Entry) -> Result<usize> {
 /// 持つノードが含まれます。これはハッシュツリーからハッシュ付きで値を参照するための動作です。false を指定した場合は
 /// 長さ 0 の `Vec` を返します。
 ///
-fn search_entry_position<C>(r: &mut C, root: &INode, i: Index, with_branch: bool) -> Result<Option<(u64, Vec<Node>)>>
+fn search_entry_position<C>(
+  r: &mut C,
+  root: &INode,
+  i: Index,
+  with_branch: bool,
+) -> Result<Option<(u64, Vec<MetaInfo>)>>
 where
   C: io::Read + io::Seek,
 {
-  if root.node.address.i == i {
+  if root.meta.address.i == i {
     // 指定されたルートノードが検索対象のノードの場合
-    return Ok(Some((root.node.address.position, vec![])));
-  } else if i == 0 || i > root.node.address.i {
+    return Ok(Some((root.meta.address.position, vec![])));
+  } else if i == 0 || i > root.meta.address.i {
     // インデックス 0 の特殊値を持つノードは明示的に存在しない
     return Ok(None);
   }
 
-  let mut branches = Vec::<Node>::with_capacity(INDEX_SIZE as usize);
+  let mut branches = Vec::<MetaInfo>::with_capacity(INDEX_SIZE as usize);
   let mut mover = root.clone();
   for _ in 0..INDEX_SIZE {
     // 次のノードのアドレスを参照
     let next = if i <= mover.left.i {
       read_branch(r, &mover.right, with_branch, &mut branches)?;
       mover.left
-    } else if i <= mover.node.address.i {
+    } else if i <= mover.meta.address.i {
       read_branch(r, &mover.left, with_branch, &mut branches)?;
       mover.right
     } else {
@@ -902,7 +1051,7 @@ where
     debug_assert_ne!(0, addr.j);
     r.seek(io::SeekFrom::Start(addr.position))?;
     let inodes = read_inodes(r, addr.position)?;
-    let inode = inodes.iter().find(|inode| inode.node.address.j == addr.j);
+    let inode = inodes.iter().find(|inode| inode.meta.address.j == addr.j);
     if let Some(inode) = inode {
       Ok(inode.clone())
     } else {
@@ -911,7 +1060,7 @@ where
     }
   }
 
-  fn read_branch<C>(r: &mut C, addr: &Address, with_branch: bool, branches: &mut Vec<Node>) -> Result<()>
+  fn read_branch<C>(r: &mut C, addr: &Address, with_branch: bool, branches: &mut Vec<MetaInfo>) -> Result<()>
   where
     C: io::Read + io::Seek,
   {
@@ -919,9 +1068,9 @@ where
       let branch = if addr.j == 0 {
         r.seek(io::SeekFrom::Start(addr.position))?;
         let entry = read_entry_without_check(r, addr.position, addr.i)?;
-        entry.enode.node
+        entry.enode.meta
       } else {
-        read_inode(r, &addr)?.node
+        read_inode(r, &addr)?.meta
       };
       branches.push(branch);
     }
@@ -932,7 +1081,7 @@ where
   inconsistency(format!(
     "The maximum hop count was exceeded before reaching node b_{} from node b_{{{},{}}}.\
      The data on the storage probably have circular references.",
-    i, root.node.address.i, root.node.address.j
+    i, root.meta.address.i, root.meta.address.j
   ))
 }
 
@@ -949,6 +1098,7 @@ fn back_to_safety(cursor: &mut dyn Cursor, distance: u32, if_err: &'static str) 
   }
 }
 
+/// panic_over_inconsistency が定義されている場合は panic して内部矛盾を検出した場所を知らせる。
 fn inconsistency<T>(msg: String) -> Result<T> {
   #[cfg(feature = "panic_over_inconsistency")]
   {

@@ -19,7 +19,7 @@ rand = "0.8"
 mt19937 = "2.0"
 
 [features]
-default = ["highwayhash64", "panic_over_inconsistency"]
+default = ["sha256", "panic_over_inconsistency"]
 highwayhash64 = []
 sha224 = []
 sha256 = []

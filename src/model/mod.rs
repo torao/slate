@@ -4,18 +4,29 @@ use std::ops::RangeInclusive;
 #[cfg(test)]
 mod test;
 
+/// MVHT がインデックス i として使用する整数の型です。`u64` を表しています。
+///
+/// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
+/// ことができます。
+///
 #[cfg(not(feature = "small_index"))]
 pub type Index = u64;
 
 #[cfg(feature = "small_index")]
 pub type Index = u32;
 
+/// [`Index`] 型のビット幅です。定数 64 を表しています。
+///
+/// コンパイル時に `small_index` feature を指定することでこの定数は 32 となります。
+///
 #[cfg(not(feature = "small_index"))]
 pub const INDEX_SIZE: u8 = 64;
 
 #[cfg(feature = "small_index")]
 pub const INDEX_SIZE: u8 = 32;
 
+/// MVHT のアルゴリズムで使用する任意のノード b_{i,j} を表すための構造体です。
+///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct Node {
   pub i: Index,
@@ -28,6 +39,8 @@ impl Node {
   }
 }
 
+/// MVHT のアルゴリズムで使用する任意の中間ノードを表すための構造体です。左右の枝への分岐を含みます。
+///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct INode {
   pub node: Node,
@@ -47,42 +60,41 @@ pub struct Step {
   pub neighbor: Node,
 }
 
+/// 目的のノードまでの経路を、その経路から分岐した先のノードのハッシュ値を含む経路を表します。
+/// 目的のノードまでの経路を表します。経路は `root` から開始し各ステップの `step` で示したノードをたどります。
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Path {
   pub root: Node,
   pub steps: Vec<Step>,
 }
 
-#[derive(Eq, PartialEq, Clone, Debug)]
-pub struct PathWithNeighbors {
-  pub path: Path,
-  pub neighbors: Vec<Node>,
-}
-
+/// n 世代のハッシュ木構造 𝑇ₙ をアルゴリズムによって表す概念モデルです。n 世代木における中間ノードや探索経路などの
+/// アルゴリズムを実装します。
+///
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Generation {
+pub struct NthGenHashTree {
   n: Index,
   pbst_roots: Vec<Node>,
   ephemeral_nodes: Vec<INode>,
 }
 
-impl Generation {
+impl NthGenHashTree {
   /// 木構造 𝑇ₙ に含まれる独立した完全二分木のルートノードとそれらを接続する中間ノードを算出します。この列は木構造の
   /// 左に存在する完全二分木が先に来るように配置されています。
-  pub fn new(n: Index) -> Generation {
+  pub fn new(n: Index) -> NthGenHashTree {
     debug_assert_ne!(0, n);
-    let pbst_roots = Generation::create_pbst_roots(n);
-    let ephemeral_nodes = Generation::create_ephemeral_nodes(n, &pbst_roots);
+    let pbst_roots = NthGenHashTree::create_pbst_roots(n);
+    let ephemeral_nodes = NthGenHashTree::create_ephemeral_nodes(n, &pbst_roots);
     debug_assert_ne!(0, pbst_roots.len());
-    Generation { n, pbst_roots, ephemeral_nodes }
+    NthGenHashTree { n, pbst_roots, ephemeral_nodes }
   }
 
-  /// この世代が何世代目かを参照します。
+  /// このハッシュ木の世代を参照します。
   pub fn n(&self) -> Index {
     self.n
   }
 
-  /// この世代のルートノードを参照します。
+  /// このハッシュ木のルートノードを参照します。
   pub fn root(&self) -> Node {
     self.ephemeral_nodes.first().map(|i| i.node).unwrap_or(*self.pbst_roots.first().unwrap())
   }
@@ -238,7 +250,7 @@ impl Generation {
   }
 }
 
-/// b_{i,j} をルートとする部分木に含まれる葉ノード b_l の範囲を算出します。
+/// 指定されたノード b_{i,j} をルートとする部分木に含まれる葉ノード b_ℓ の範囲を算出します。
 #[inline]
 pub fn range(i: Index, j: u8) -> RangeInclusive<Index> {
   debug_assert!(j <= 64); // i=u64::MAX のとき j=64
@@ -247,14 +259,15 @@ pub fn range(i: Index, j: u8) -> RangeInclusive<Index> {
   i_min..=i_max
 }
 
-/// b_{i,j} をルートとする部分木にノード b_{k,*} が含まれているかを判定します。これは T_{k,*} が T_{i,j} の
-/// 部分木かの判定と同じです。
+/// 指定されたノード b_{i,j} をルートとする部分木にノード b_{k,\*} が含まれているかを判定します。これは T_{k,*} が
+/// T_{i,j} の部分木かを判定することと意味的に同じです。
 #[inline]
 pub fn contains(i: Index, j: u8, k: Index) -> bool {
   debug_assert!(j <= 64); // i=u64::MAX のとき j=64
   range(i, j).contains(&k)
 }
 
+/// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを判定します。
 #[inline]
 pub fn is_pbst(i: Index, j: u8) -> bool {
   i & (((1u128 << j) - 1) as u64) == 0

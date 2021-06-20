@@ -1,16 +1,18 @@
 use std::cmp::max;
+use std::env::temp_dir;
 use std::hash::Hasher;
 use std::io;
-use std::io::Seek;
+use std::io::{ErrorKind, Seek};
 use std::io::{SeekFrom, Write};
 use std::ops::Add;
+use std::path::{PathBuf, MAIN_SEPARATOR};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayBuilder, Key};
 use mt19937::MT19937;
 use rand::RngCore;
 
-use crate::algorithm::ceil_log2;
+use crate::model::ceil_log2;
 use crate::*;
 
 /// 単一のエントリの直列化と復元をテストします。
@@ -86,7 +88,7 @@ fn bootstrap() {
   let storage = MemStorage::with(buffer.clone());
   let db = MVHT::new(storage).unwrap();
   let content = buffer.read().unwrap();
-  assert_eq!(RootRef::None, db.root());
+  assert_eq!(RootRef::None, db.root_ref());
   assert_eq!(4, content.len());
   assert_eq!(&STORAGE_IDENTIFIER[..], &content[..3]);
   assert_eq!(STORAGE_VERSION, content[3]);
@@ -101,9 +103,9 @@ fn bootstrap() {
     let storage = MemStorage::with(buffer.clone());
     let db = MVHT::new(storage).unwrap();
     if let Some(last) = entry.inodes.last() {
-      assert_eq!(RootRef::INode(&last), db.root());
+      assert_eq!(RootRef::INode(&last), db.root_ref());
     } else {
-      assert_eq!(RootRef::ENode(&entry.enode), db.root());
+      assert_eq!(RootRef::ENode(&entry.enode), db.root_ref());
     }
   }
 }
@@ -137,10 +139,9 @@ fn test_get_values_with_hashes() {
   const N: u64 = 100;
   for n in 1..=N {
     let db = prepare_db(n, PAYLOAD_SIZE);
-    let tree = Generation::new(n);
+    let tree = NthGenHashTree::new(n);
     for i in 0..n {
       for j in 0..=ceil_log2(i + 1) {
-
         // 範囲外のノードを参照
         assert!(db.get_values_with_hashes(0, j).unwrap().is_none());
         assert!(db.get_values_with_hashes(n + 1, j).unwrap().is_none());
@@ -153,7 +154,7 @@ fn test_get_values_with_hashes() {
         let data_set = db.get_values_with_hashes(i + 1, j).unwrap().unwrap();
 
         // ルートハッシュを検証
-        assert_eq!(db.root_hash().unwrap(), data_set.root_hash());
+        assert_eq!(db.root_hash().unwrap(), data_set.root().hash);
 
         // 想定した範囲の値を取得しているか
         let range = range(i + 1, j);
@@ -187,10 +188,11 @@ fn prepare_db(n: u64, payload_size: usize) -> MVHT<MemStorage> {
 
   for i in 0..n {
     let value = random_payload(payload_size, i + 1);
-    let (index, hash) = db.append(value.as_slice()).expect("append() failed");
+    let root = db.append(value.as_slice()).expect("append() failed");
     // dump(&mut db);
-    assert_eq!(i + 1, index, "{}", hex(buffer.read().unwrap().as_slice()));
-    assert_eq!(Hash::hash(&value), hash);
+    assert_eq!(db.root().unwrap(), root);
+    assert_eq!(i + 1, root.i);
+    assert_eq!(ceil_log2(i + 1), root.j);
   }
   db
 }
@@ -228,12 +230,12 @@ fn representative_entries(position: u64) -> Vec<Entry> {
 }
 
 fn enode(i: u64, position: u64, payload: Vec<u8>) -> ENode {
-  ENode { node: Node { address: Address { i, j: 0, position }, hash: random_hash(position ^ i) }, payload }
+  ENode { meta: MetaInfo { address: Address { i, j: 0, position }, hash: random_hash(position ^ i) }, payload }
 }
 
 fn inode(i: u64, j: u8, position: u64) -> INode {
   INode {
-    node: Node { address: Address { i, j, position }, hash: random_hash(position ^ j as u64) },
+    meta: MetaInfo { address: Address { i, j, position }, hash: random_hash(position ^ j as u64) },
     left: Address { i: i - 1, j: 0, position: max(position as i64 - 100, 0) as u64 },
     right: Address { i, j: j - 1, position },
   }
@@ -278,29 +280,29 @@ fn dump<T: Storage>(db: &MVHT<T>) -> String {
       format!(
         "{{\n{}i: {}, j: {}, position: {},\n{}hash: 0x{}, hash_length: {},\n{}payload: 0x{}, payload_length: {},\n{}}}",
         indent(idt + 1),
-        enode.node.address.i,
-        enode.node.address.j,
-        enode.node.address.position,
+        enode.meta.address.i,
+        enode.meta.address.j,
+        enode.meta.address.position,
         indent(idt + 1),
-        hex(&enode.node.hash.value),
-        enode.node.hash.value.len(),
+        hex(&enode.meta.hash.value),
+        enode.meta.hash.value.len(),
         indent(idt + 1),
         hex(&enode.payload),
         enode.payload.len(),
         indent(idt)
       )
-    } else if let Some(inode) = entry.inodes.iter().find(|n| n.node.address.j == addr.j) {
+    } else if let Some(inode) = entry.inodes.iter().find(|n| n.meta.address.j == addr.j) {
       let left = node(r, idt + 1, &inode.left);
       let right = node(r, idt + 1, &inode.right);
       format!(
         "{{\n{}i: {}, j: {}, position: {},\n{}hash: 0x{}, hash_length: {},\n{}left: {},\n{}right: {}\n{}}}",
         indent(idt + 1),
-        inode.node.address.i,
-        inode.node.address.j,
-        inode.node.address.position,
+        inode.meta.address.i,
+        inode.meta.address.j,
+        inode.meta.address.position,
         indent(idt + 1),
-        hex(&inode.node.hash.value),
-        inode.node.hash.value.len(),
+        hex(&inode.meta.hash.value),
+        inode.meta.hash.value.len(),
         indent(idt + 1),
         left,
         indent(idt + 1),
@@ -311,10 +313,10 @@ fn dump<T: Storage>(db: &MVHT<T>) -> String {
       "error: \"inode {:?} is not exist in the entry.\"".to_string()
     }
   }
-  let address = match db.root() {
+  let address = match db.root_ref() {
     RootRef::None => None,
-    RootRef::ENode(enode) => Some(enode.node.address),
-    RootRef::INode(inode) => Some(inode.node.address),
+    RootRef::ENode(enode) => Some(enode.meta.address),
+    RootRef::INode(inode) => Some(inode.meta.address),
   };
   if let Some(address) = address {
     let mut cursor = db.storage.open(false).unwrap();
@@ -322,4 +324,76 @@ fn dump<T: Storage>(db: &MVHT<T>) -> String {
   } else {
     "".to_string()
   }
+}
+
+/// ファイルストレージの適合テスト。
+#[test]
+fn test_file_storage() {
+  let file = temp_file("mvht-storage", ".db");
+  verify_storage_spec(&file).expect(&format!("MVHT compliance test filed: {}", file.to_string_lossy()));
+  remove_file(file.to_path_buf()).expect(&format!("failed to remove temporary file: {}", file.to_string_lossy()));
+}
+
+/// メモリーストレージの適合テスト
+#[test]
+fn test_memory_storage() {
+  verify_storage_spec(&MemStorage::new()).expect("MVHT compliance test filed");
+}
+
+/// 指定されたストレージが仕様に準拠していることを検証します。
+pub fn verify_storage_spec(storage: &dyn Storage) -> Result<()> {
+  // 読み込み専用または書き込み用に (同時に) オープンできることを確認
+  let mut writer = storage.open(true).expect("failed to open cursor as writable");
+  let mut reader1 = storage.open(false).expect("failed to open cursor as read-only #1");
+
+  // まだ書き込んでいない状態で末尾までシーク
+  let zero_position = reader1.seek(SeekFrom::End(0)).expect("failed to seek on zero-length storage");
+  assert_eq!(0, zero_position);
+
+  // 書き込みの実行
+  let values = (0u8..=255).collect::<Vec<u8>>();
+  for i in values.iter() {
+    writer.write_u8(*i).expect(&format!("fail to write at {}", *i));
+  }
+
+  // 書き込み後に 2 つめの読み込み専用カーソルをオープン
+  let mut reader2 = storage.open(false).expect("failed to open cursor as read-only #2");
+
+  // 読み込みの実行
+  for i in values.iter() {
+    let value = reader1.read_u8().expect(&format!("failed to read at {}", *i));
+    assert_eq!(*i, value);
+  }
+
+  // シークしてもう一度読み込みを実行 (ランダムアクセス)
+  reader1.seek(SeekFrom::Start(0)).expect("fail to seek from 256 to 0");
+  let mut rand = mt19937::MT19937::new_with_slice_seed(&[0u32]);
+  for _ in 0..100 {
+    let i = (rand.next_u32() & 0xFF) as u8;
+    reader1.seek(SeekFrom::Start(i as u64)).expect(&format!("failed to seek to {}", i));
+    let value = reader1.read_u8().expect(&format!("failed to read from cursor #1 at {}", i));
+    assert_eq!(i, value);
+    let i = (rand.next_u32() & 0xFF) as u8;
+    reader2.seek(SeekFrom::Start(i as u64)).expect(&format!("failed to seek to {}", i));
+    let value = reader2.read_u8().expect(&format!("failed to read from cursor #2 at {}", i));
+    assert_eq!(i, value);
+  }
+  Ok(())
+}
+
+/// 指定された接頭辞と接尾辞を持つ 0 バイトのテンポラリファイルをシステムのテンポラリディレクトリ上に作成します。
+/// 作成したファイルは呼び出し側で削除する必要があります。
+pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
+  let dir = temp_dir();
+  for i in 0u16..=u16::MAX {
+    let file_name = format!("{}{}{}", prefix, i, suffix);
+    let mut file = dir.to_path_buf();
+    file.push(file_name);
+    match OpenOptions::new().write(true).create_new(true).open(file.to_path_buf()) {
+      Ok(_) => return file,
+      Err(err) if err.kind() == ErrorKind::AlreadyExists => (),
+      Err(err) => panic!("{}", err),
+    }
+  }
+  panic!("cannot create new temporary file: {}{}{}nnn{}", dir.to_string_lossy(), MAIN_SEPARATOR, prefix, suffix);
 }

@@ -2,6 +2,10 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Detail {
+  // ローカルファイルのオープンに失敗
+  #[error("Failed to open local file {file}; {message}")]
+  FailedToOpenLocalFile { file: String, message: String },
+
   // ストレージの内容が MVHT ではない
   #[error("The contents of storage are not for MVHT: {message}")]
   FileIsNotContentsOfMVHTree { message: &'static str },
