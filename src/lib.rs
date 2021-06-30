@@ -13,27 +13,30 @@
 //! let mut db = MVHT::new(MemStorage::new()).unwrap();
 //!
 //! // Returns None for non-existent indices.
-//! assert_eq!(None, db.get(1).unwrap());
+//! let mut query = db.query().unwrap();
+//! assert_eq!(None, query.get(1).unwrap());
 //!
 //! // The first value is considered to index 1, and they are simply incremented thereafter.
 //! let first = "first".as_bytes();
 //! let root = db.append(first).unwrap();
+//! let mut query = db.query().unwrap();
 //! assert_eq!(1, root.i);
-//! assert_eq!(first, db.get(root.i).unwrap().unwrap());
+//! assert_eq!(first, query.get(root.i).unwrap().unwrap());
 //!
 //! // Similar to the typical hash tree, you can refer to a verifiable value using root hash.
 //! let second = "second".as_bytes();
 //! let third = "third".as_bytes();
 //! db.append(second).unwrap();
 //! let root = db.append(third).unwrap();
-//! let values = db.get_values_with_hashes(2, 0).unwrap().unwrap();
+//! let mut query = db.query().unwrap();
+//! let values = query.get_values_with_hashes(2, 0).unwrap().unwrap();
 //! assert_eq!(1, values.values.len());
 //! assert_eq!(Value::new(2, second.to_vec()), values.values[0]);
 //! assert_eq!(Node::new(3, 2, root.hash), values.root());
 //!
 //! // By specifying `j` greater than 0, you can refer to contiguous values that belongs to
 //! // the binary subtree. The following refers to the values belonging to intermediate nodes b₂₁.
-//! let values = db.get_values_with_hashes(2, 1).unwrap().unwrap();
+//! let values = query.get_values_with_hashes(2, 1).unwrap().unwrap();
 //! assert_eq!(2, values.values.len());
 //! assert_eq!(Value::new(1, first.to_vec()), values.values[0]);
 //! assert_eq!(Value::new(2, second.to_vec()), values.values[1]);
@@ -482,11 +485,62 @@ fn is_version_compatible(version: u8) -> bool {
   version <= STORAGE_VERSION
 }
 
+#[derive(PartialEq, Eq, Debug)]
+struct CacheInner {
+  last_entry: Entry,
+  model: NthGenHashTree,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+struct Cache(Option<CacheInner>);
+
+impl Cache {
+  fn new(last_entry: Entry, model: NthGenHashTree) -> Self {
+    debug_assert_eq!(model.n(), last_entry.enode.meta.address.i);
+    Cache(Some(CacheInner { last_entry, model }))
+  }
+  fn from_entry(last_entry: Option<Entry>) -> Self {
+    let inner = if let Some(last_entry) = last_entry {
+      let n = last_entry.enode.meta.address.i;
+      let model = NthGenHashTree::new(n);
+      Some(CacheInner { last_entry, model })
+    } else {
+      None
+    };
+    Cache(inner)
+  }
+
+  fn last_entry(&self) -> Option<&Entry> {
+    if let Some(CacheInner { last_entry, .. }) = &self.0 {
+      Some(last_entry)
+    } else {
+      None
+    }
+  }
+
+  fn root(&self) -> Option<Node> {
+    self
+      .last_entry()
+      .map(|e| e.inodes.last().map(|i| &i.meta).unwrap_or(&e.enode.meta))
+      .map(|root| Node::new(root.address.i, root.address.j, root.hash))
+  }
+
+  fn root_ref<'a>(&self) -> RootRef {
+    self
+      .last_entry()
+      .map(|e| e.inodes.last().map(|i| RootRef::INode(i)).unwrap_or(RootRef::ENode(&e.enode)))
+      .unwrap_or(RootRef::None)
+  }
+
+  fn n(&self) -> Index {
+    self.last_entry().map(|e| e.enode.meta.address.i).unwrap_or(0)
+  }
+}
+
 /// ストレージ上に直列化された Multi-Versioned Hash Tree を表す木構造に対する操作を実装します。
 pub struct MVHT<S: Storage> {
   storage: Box<S>,
-  cursor: Box<dyn Cursor>,
-  last: Option<Entry>,
+  latest_cache: Arc<Cache>,
 }
 
 impl<S: Storage> MVHT<S> {
@@ -509,7 +563,7 @@ impl<S: Storage> MVHT<S> {
   /// fn append_and_get(file: &PathBuf) -> Result<()>{
   ///   let mut db = MVHT::new(file)?;
   ///   let root = db.append(&vec![0u8, 1, 2, 3])?;
-  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.get(root.i)?);
+  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.query()?.get(root.i)?);
   ///   Ok(())
   /// }
   ///
@@ -519,28 +573,23 @@ impl<S: Storage> MVHT<S> {
   /// remove_file(path.as_path()).unwrap();
   /// ```
   pub fn new(storage: S) -> Result<MVHT<S>> {
-    let cursor = storage.open(true)?;
-    let mut db = MVHT { storage: Box::new(storage), cursor, last: None };
+    let gen_cache = Arc::new(Cache::from_entry(None));
+    let mut db = MVHT { storage: Box::new(storage), latest_cache: gen_cache };
     db.init()?;
     Ok(db)
   }
 
   /// 現在の木構造のルートノードを参照します。
   pub fn root(&self) -> Option<Node> {
-    (match &self.root_ref() {
-      RootRef::INode(inode) => Some(inode.meta),
-      RootRef::ENode(enode) => Some(enode.meta),
-      RootRef::None => None,
-    })
-    .map(|root| Node::new(root.address.i, root.address.j, root.hash))
+    self.latest_cache.root()
   }
 
   /// 木構造の現在の世代 (リストとして何個の要素を保持しているか) を返します。
   pub fn n(&self) -> Index {
-    self.root().map(|root| root.i).unwrap_or(0)
+    self.latest_cache.n()
   }
 
-  /// この MVHT の現在の高さを参照します。一つのノードも含まれていない場合は 0 を返します。
+  /// この MVHT の現在の高さを参照します。ノードが一つも含まれていない場合は 0 を返します。
   pub fn height(&self) -> u8 {
     self.root().map(|root| root.j).unwrap_or(0)
   }
@@ -550,34 +599,25 @@ impl<S: Storage> MVHT<S> {
     self.root().map(|root| root.hash)
   }
 
-  pub fn storage(&self) -> &dyn Storage {
+  pub fn storage(&self) -> &S {
     self.storage.as_ref()
   }
 
-  fn root_ref<'a>(&self) -> RootRef {
-    match &self.last {
-      None => RootRef::None,
-      Some(entry) => match entry.inodes.last() {
-        Some(inode) => RootRef::INode(inode),
-        None => RootRef::ENode(&entry.enode),
-      },
-    }
-  }
-
   fn init(&mut self) -> Result<()> {
-    let length = self.cursor.seek(io::SeekFrom::End(0))?;
+    let mut cursor = self.storage.open(true)?;
+    let length = cursor.seek(io::SeekFrom::End(0))?;
     match length {
       0 => {
         // マジックナンバーの書き込み
-        self.cursor.write_all(&STORAGE_IDENTIFIER)?;
-        self.cursor.write_u8(STORAGE_VERSION)?;
+        cursor.write_all(&STORAGE_IDENTIFIER)?;
+        cursor.write_u8(STORAGE_VERSION)?;
       }
       1..=3 => return Err(FileIsNotContentsOfMVHTree { message: "bad magic number" }),
       _ => {
         // マジックナンバーの確認
         let mut buffer = [0u8; 4];
-        self.cursor.seek(io::SeekFrom::Start(0))?;
-        self.cursor.read_exact(&mut buffer)?;
+        cursor.seek(io::SeekFrom::Start(0))?;
+        cursor.read_exact(&mut buffer)?;
         if buffer[..3] != STORAGE_IDENTIFIER[..] {
           return Err(FileIsNotContentsOfMVHTree { message: "bad magic number" });
         } else if !is_version_compatible(buffer[3]) {
@@ -586,16 +626,16 @@ impl<S: Storage> MVHT<S> {
       }
     }
 
-    let length = self.cursor.seek(io::SeekFrom::End(0))?;
+    let length = cursor.seek(io::SeekFrom::End(0))?;
     let tail = if length == 4 {
       None
     } else {
       // 末尾のエントリを読み込み
-      back_to_safety(self.cursor.as_mut(), 4 + 8, "The first entry is corrupted.")?;
-      let offset = self.cursor.read_u32::<LittleEndian>()?;
-      back_to_safety(self.cursor.as_mut(), offset + 4, "The last entry is corrupted.")?;
-      let entry = read_entry(&mut self.cursor, 0)?;
-      if self.cursor.stream_position()? != length {
+      back_to_safety(cursor.as_mut(), 4 + 8, "The first entry is corrupted.")?;
+      let offset = cursor.read_u32::<LittleEndian>()?;
+      back_to_safety(cursor.as_mut(), offset + 4, "The last entry is corrupted.")?;
+      let entry = read_entry(&mut cursor, 0)?;
+      if cursor.stream_position()? != length {
         // 壊れたストレージから読み込んだ offset が、たまたまどこかの正しいエントリ境界を指していた場合、正しく
         // 読み込めるが結果となる位置は末尾と一致しない。
         let msg = "The last entry is corrupted.".to_string();
@@ -604,8 +644,10 @@ impl<S: Storage> MVHT<S> {
       Some(entry)
     };
 
-    self.last = tail;
-    self.cursor.seek(io::SeekFrom::End(0))?;
+    // キャッシュを更新
+    let new_cache = Cache::from_entry(tail);
+    self.latest_cache = Arc::new(new_cache);
+
     Ok(())
   }
 
@@ -620,18 +662,15 @@ impl<S: Storage> MVHT<S> {
       return Err(TooLargePayload { size: value.len() });
     }
 
+    let mut cursor = self.storage.open(true)?;
+
     // 葉ノードの構築
-    let position = self.cursor.stream_position()?;
-    let i = match self.root_ref() {
-      RootRef::None => 1,
-      RootRef::ENode(enode) => enode.meta.address.i + 1,
-      RootRef::INode(inode) => inode.meta.address.i + 1,
-    };
+    let position = cursor.seek(SeekFrom::End(0))?;
+    let i = self.latest_cache.root().map(|node| node.i + 1).unwrap_or(1);
     let hash = Hash::hash(value);
     let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), hash), payload: Vec::from(value) };
 
     // 中間ノードの構築
-    let mut cursor = self.storage.open(false)?;
     let mut inodes = Vec::<INode>::with_capacity(INDEX_SIZE as usize);
     let mut right_hash = enode.meta.hash;
     let gen = NthGenHashTree::new(i);
@@ -642,7 +681,7 @@ impl<S: Storage> MVHT<S> {
       debug_assert_eq!(n.node.i, n.right.i);
       debug_assert!(n.node.j >= n.right.j + 1);
       debug_assert!(n.left.j >= n.right.j);
-      if let Some(left) = self.get_node(&mut cursor, n.left.i, n.left.j)? {
+      if let Some(left) = Query::get_node(&self.latest_cache, &mut cursor, n.left.i, n.left.j)? {
         let right = Address::new(n.right.i, n.right.j, position);
         let hash = left.hash.combine(&right_hash);
         let node = MetaInfo::new(Address::new(n.node.i, n.node.j, position), hash);
@@ -660,21 +699,40 @@ impl<S: Storage> MVHT<S> {
       if let Some(inode) = inodes.last() { (inode.meta.address.j, inode.meta.hash) } else { (0u8, enode.meta.hash) };
 
     // エントリを書き込んで状態を更新
+    cursor.seek(SeekFrom::End(0))?;
     let entry = Entry { enode, inodes };
-    write_entry(&mut self.cursor, &entry)?;
-    self.last = Some(entry);
+    write_entry(&mut cursor, &entry)?;
+
+    // キャッシュを更新
+    self.latest_cache = Arc::new(Cache::new(entry, gen));
 
     Ok(Node::new(i, j, root_hash))
   }
 
+  pub fn query(&self) -> Result<Query> {
+    let cursor = self.storage.open(false)?;
+    let gen = self.latest_cache.clone();
+    Ok(Query { cursor, gen })
+  }
+}
+
+pub struct Query {
+  cursor: Box<dyn Cursor>,
+  gen: Arc<Cache>,
+}
+
+impl Query {
+  /// このクエリーが対象としている木構造の世代を参照します。
+  pub fn n(&self) -> Index {
+    self.gen.n()
+  }
+
   /// 範囲外のインデックス (0 を含む) を指定した場合は `None` を返します。
-  pub fn get(&self, i: Index) -> Result<Option<Vec<u8>>> {
-    let mut cursor = self.storage.open(false)?;
-    if let Some(node) = self.get_node(&mut cursor, i, 0)? {
-      cursor.seek(io::SeekFrom::Start(node.address.position))?;
-      let entry = read_entry_without_check(&mut cursor, node.address.position, node.address.i)?;
-      let Entry { enode, .. } = entry;
-      let ENode { payload, .. } = enode;
+  pub fn get(&mut self, i: Index) -> Result<Option<Vec<u8>>> {
+    if let Some(node) = Self::get_node(self.gen.as_ref(), &mut self.cursor, i, 0)? {
+      self.cursor.seek(io::SeekFrom::Start(node.address.position))?;
+      let entry = read_entry_without_check(&mut self.cursor, node.address.position, node.address.i)?;
+      let Entry { enode: ENode { payload, .. }, .. } = entry;
       Ok(Some(payload))
     } else {
       Ok(None)
@@ -683,7 +741,7 @@ impl<S: Storage> MVHT<S> {
 
   /// 葉ノード b_i の値を中間ノードのハッシュ値付きで取得します。
   #[inline]
-  pub fn get_with_hashes(&self, i: Index) -> Result<Option<ValuesWithBranches>> {
+  pub fn get_with_hashes(&mut self, i: Index) -> Result<Option<ValuesWithBranches>> {
     self.get_values_with_hashes(i, 0)
   }
 
@@ -710,7 +768,8 @@ impl<S: Storage> MVHT<S> {
   ///   let current_root = db.append(&i.to_le_bytes()).unwrap();
   ///   latest_root_hash = current_root.hash;
   /// }
-  /// let values = db.get_values_with_hashes(40, 3).unwrap().unwrap();
+  /// let mut query = db.query().unwrap();
+  /// let values = query.get_values_with_hashes(40, 3).unwrap().unwrap();
   /// assert!(is_pbst(40, 3));
   /// assert_eq!(1 << 3, values.values.len());
   /// assert_eq!(*range(40, 3).start(), values.values[0].i);
@@ -718,37 +777,40 @@ impl<S: Storage> MVHT<S> {
   /// assert_eq!(latest_root_hash, values.root().hash);
   /// ```
   ///
-  pub fn get_values_with_hashes(&self, i: Index, j: u8) -> Result<Option<ValuesWithBranches>> {
-    if i == 0 || i > self.n() {
+  pub fn get_values_with_hashes(&mut self, i: Index, j: u8) -> Result<Option<ValuesWithBranches>> {
+    let (last_entry, model) = if let Some(CacheInner { last_entry, model }) = &self.gen.0 {
+      if i == 0 || i > model.n() {
+        return Ok(None);
+      }
+      (last_entry, model)
+    } else {
       return Ok(None);
-    }
-    let mut cursor = self.storage.open(false)?;
-    let root = match self.root_ref() {
+    };
+    let root = match self.gen.root_ref() {
       RootRef::INode(inode) => *inode,
       RootRef::ENode(enode) => {
-        cursor.seek(SeekFrom::Start(enode.meta.address.position))?;
+        self.cursor.seek(SeekFrom::Start(enode.meta.address.position))?;
         let Entry { enode: ENode { payload, .. }, .. } =
-          read_entry_without_check(&mut cursor, enode.meta.address.position, i)?;
+          read_entry_without_check(&mut self.cursor, enode.meta.address.position, i)?;
         return Ok(Some(ValuesWithBranches { values: vec![Value { i, value: payload }], branches: vec![] }));
       }
       RootRef::None => return Ok(None),
     };
-    let gen = NthGenHashTree::new(root.meta.address.i);
-    let path = match gen.path_to(i, j) {
+    let path = match model.path_to(i, j) {
       Some(path) => path,
       None => return Ok(None),
     };
-    debug_assert_eq!(gen.root().i, root.meta.address.i);
-    debug_assert_eq!(gen.root().j, root.meta.address.j);
+    debug_assert_eq!(model.root().i, root.meta.address.i);
+    debug_assert_eq!(model.root().j, root.meta.address.j);
 
     // 目的のノードまで経路を移動しながら分岐のハッシュ値を取得する
     let mut prev = root;
-    let mut inodes = self.last.as_ref().map(|l| l.inodes.clone()).unwrap();
+    let mut inodes = last_entry.inodes.clone();
     let mut branches = Vec::<Node>::with_capacity(INDEX_SIZE as usize);
     for step in path.steps.iter().map(|s| s.step) {
       // 左枝側のエントリの INode を読み込み (右枝側のノードは inodes に含まれている)
-      cursor.seek(SeekFrom::Start(prev.left.position))?;
-      let left_inodes = read_inodes(&mut cursor, prev.left.position)?;
+      self.cursor.seek(SeekFrom::Start(prev.left.position))?;
+      let left_inodes = read_inodes(&mut self.cursor, prev.left.position)?;
 
       // 左右どちらの枝が次のノードでどちらが分岐のノードかを判断
       let (next, next_inodes, branch, branch_inodes) = if prev.left.i == step.i && prev.left.j == step.j {
@@ -777,15 +839,16 @@ impl<S: Storage> MVHT<S> {
         }
       } else {
         // ENode として分岐したノードを読み込んで保存
-        cursor.seek(SeekFrom::Start(branch.position))?;
-        let entry = read_entry_without_check(&mut cursor, branch.position, branch.i)?;
+        self.cursor.seek(SeekFrom::Start(branch.position))?;
+        let entry = read_entry_without_check(&mut self.cursor, branch.position, branch.i)?;
         branches.push(Node::for_node(&entry.enode.meta));
       }
 
       if next.j == 0 {
         debug_assert_eq!((i, j), (next.i, next.j), "branch={:?}", branch);
-        cursor.seek(SeekFrom::Start(next.position))?;
-        let Entry { enode: ENode { payload, .. }, .. } = read_entry_without_check(&mut cursor, next.position, next.i)?;
+        self.cursor.seek(SeekFrom::Start(next.position))?;
+        let Entry { enode: ENode { payload, .. }, .. } =
+          read_entry_without_check(&mut self.cursor, next.position, next.i)?;
         let values = vec![Value { i: next.i, value: payload }];
         return Ok(Some(ValuesWithBranches::new(values, branches)));
       }
@@ -803,12 +866,12 @@ impl<S: Storage> MVHT<S> {
     }
 
     // 目的のノードに含まれている値を取得する
-    let values = self.get_values_belonging_to(&mut cursor, &prev)?;
+    let values = self.get_values_belonging_to(&prev)?;
     Ok(Some(ValuesWithBranches::new(values, branches)))
   }
 
-  fn get_node(&self, cursor: &mut Box<dyn Cursor>, i: Index, j: u8) -> Result<Option<MetaInfo>> {
-    if let Some((position, _)) = self.get_entry_position(cursor, i, false)? {
+  fn get_node(gen: &Cache, cursor: &mut Box<dyn Cursor>, i: Index, j: u8) -> Result<Option<MetaInfo>> {
+    if let Some((position, _)) = Self::get_entry_position(gen, cursor, i, false)? {
       cursor.seek(io::SeekFrom::Start(position))?;
       if j == 0 {
         let entry = read_entry_without_check(cursor, position, i)?;
@@ -824,12 +887,12 @@ impl<S: Storage> MVHT<S> {
 
   /// 指定された `inode` をルートとする部分木に含まれているすべての値を参照します。読み出し用のカーソルは `inode`
   /// の位置を指している必要はありません。
-  fn get_values_belonging_to(&self, cursor: &mut Box<dyn Cursor>, inode: &INode) -> Result<Vec<Value>> {
+  fn get_values_belonging_to(&mut self, inode: &INode) -> Result<Vec<Value>> {
     // inode を左枝方向に葉に到達するまで移動
     let mut mover = *inode;
     while mover.left.j > 0 {
-      cursor.seek(SeekFrom::Start(mover.left.position))?;
-      let inodes = read_inodes(cursor, mover.left.position)?;
+      self.cursor.seek(SeekFrom::Start(mover.left.position))?;
+      let inodes = read_inodes(&mut self.cursor, mover.left.position)?;
       mover = match inodes.iter().find(|node| node.meta.address.j == mover.left.j) {
         Some(inode) => *inode,
         None => panic!(),
@@ -840,9 +903,9 @@ impl<S: Storage> MVHT<S> {
     let (i0, i1) = (*range.start(), *range.end());
     let mut values = Vec::<Value>::with_capacity((i1 - i0) as usize);
     let mut i = mover.left.i;
-    cursor.seek(SeekFrom::Start(mover.left.position))?;
+    self.cursor.seek(SeekFrom::Start(mover.left.position))?;
     while i <= i1 {
-      let Entry { enode: ENode { meta: node, payload }, .. } = read_entry_without_check_to_end(cursor, i)?;
+      let Entry { enode: ENode { meta: node, payload }, .. } = read_entry_without_check_to_end(&mut self.cursor, i)?;
       debug_assert!(node.address.i == i);
       values.push(Value { i, value: payload });
       i += 1;
@@ -852,12 +915,12 @@ impl<S: Storage> MVHT<S> {
 
   /// `i` 番目のエントリの位置を参照します。この検索は現在のルートノードを基準にした探索を行います。
   fn get_entry_position(
-    &self,
+    gen: &Cache,
     cursor: &mut Box<dyn Cursor>,
     i: Index,
     with_branch: bool,
   ) -> Result<Option<(Index, Vec<MetaInfo>)>> {
-    match &self.root_ref() {
+    match &gen.root_ref() {
       RootRef::INode(root) => {
         let root = (*root).clone();
         search_entry_position(cursor, &root, i, with_branch)

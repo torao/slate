@@ -10,7 +10,7 @@ use crate::{hex, is_version_compatible, Hash, Result, CHECKSUM_HW64_KEY, HASH_SI
 
 pub trait SeekRead: Seek + std::io::Read {}
 
-/// していされたカーソルから読み出される直列化された木構造を人の見やすい形式で出力します。
+/// 指定されたカーソルから読み出される直列化された木構造を人の見やすい形式で出力します。
 pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
   let eof = cursor.seek(SeekFrom::End(0))?;
   cursor.seek(SeekFrom::Start(0))?;

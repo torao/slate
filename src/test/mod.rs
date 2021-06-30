@@ -4,8 +4,8 @@ use std::hash::Hasher;
 use std::io;
 use std::io::{ErrorKind, Seek};
 use std::io::{SeekFrom, Write};
-use std::ops::Add;
 use std::path::{PathBuf, MAIN_SEPARATOR};
+use std::thread::{spawn, JoinHandle};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayBuilder, Key};
@@ -14,6 +14,35 @@ use rand::RngCore;
 
 use crate::model::ceil_log2;
 use crate::*;
+
+#[test]
+fn test_multi_threaded_query() {
+  const N: u64 = 100;
+  for n in 1..=N {
+    let db = Arc::new(prepare_db(n, PAYLOAD_SIZE));
+    let mut handles = Vec::<JoinHandle<()>>::with_capacity(10);
+    for _ in 0..handles.capacity() {
+      let cloned_db = db.clone();
+      handles.push(spawn(move || {
+        let mut query = cloned_db.query().unwrap();
+        for i in 0..=N {
+          if let Some(value) = query.get(i).unwrap() {
+            assert!(i > 0 || i <= n);
+            assert_eq!(random_payload(PAYLOAD_SIZE, i), value);
+          } else {
+            assert!(i == 0 || i > n, "None for i={}, n={}", i, n);
+          }
+        }
+      }));
+    }
+
+    // すべてのスレッドが終了するまで待機
+    while !handles.is_empty() {
+      let result = handles.pop().unwrap().join();
+      assert!(result.is_ok(), "{:?}", result.unwrap_err());
+    }
+  }
+}
 
 /// 単一のエントリの直列化と復元をテストします。
 #[test]
@@ -82,13 +111,18 @@ fn garbled_at_any_position() -> Result<()> {
 }
 
 #[test]
-fn bootstrap() {
+fn test_bootstrap() {
   // 空のストレージを指定してファイル識別子が出力されることを確認
   let buffer = Arc::new(RwLock::new(Vec::<u8>::with_capacity(4 * 1024)));
   let storage = MemStorage::with(buffer.clone());
   let db = MVHT::new(storage).unwrap();
   let content = buffer.read().unwrap();
-  assert_eq!(RootRef::None, db.root_ref());
+  let mut session = db.query().unwrap();
+  assert_eq!(None, db.root());
+  assert_eq!(0, db.n());
+  assert_eq!(None, db.root_hash());
+  assert_eq!(0, session.n());
+  assert_eq!(None, session.get(1).unwrap());
   assert_eq!(4, content.len());
   assert_eq!(&STORAGE_IDENTIFIER[..], &content[..3]);
   assert_eq!(STORAGE_VERSION, content[3]);
@@ -102,11 +136,8 @@ fn bootstrap() {
     let buffer = Arc::new(RwLock::new(buffer));
     let storage = MemStorage::with(buffer.clone());
     let db = MVHT::new(storage).unwrap();
-    if let Some(last) = entry.inodes.last() {
-      assert_eq!(RootRef::INode(&last), db.root_ref());
-    } else {
-      assert_eq!(RootRef::ENode(&entry.enode), db.root_ref());
-    }
+    let last = entry.inodes.last().map(|i| i.meta).unwrap_or(entry.enode.meta);
+    assert_eq!(Some(Node::new(last.address.i, last.address.j, last.hash)), db.root());
   }
 }
 
@@ -118,18 +149,19 @@ fn test_append_and_get() {
   const N: u64 = 100;
   for n in 1..=N {
     let db = prepare_db(n, PAYLOAD_SIZE);
+    let mut query = db.query().unwrap();
 
     // 単一の葉ノードを参照
     for i in 0..n {
       let expected = random_payload(PAYLOAD_SIZE, i + 1);
-      let value = db.get(i + 1).unwrap();
-      assert!(value.is_some(), "value cannot retrieve: {}, {}", i + 1, dump(&db));
+      let value = query.get(i + 1).unwrap();
+      assert!(value.is_some());
       assert_eq!(expected, value.unwrap());
     }
 
     // 範囲外のノードを参照
-    assert!(db.get(0).unwrap().is_none());
-    assert!(db.get(n + 1).unwrap().is_none());
+    assert!(query.get(0).unwrap().is_none());
+    assert!(query.get(n + 1).unwrap().is_none());
   }
 }
 
@@ -139,19 +171,20 @@ fn test_get_values_with_hashes() {
   const N: u64 = 100;
   for n in 1..=N {
     let db = prepare_db(n, PAYLOAD_SIZE);
+    let mut query = db.query().unwrap();
     let tree = NthGenHashTree::new(n);
     for i in 0..n {
       for j in 0..=ceil_log2(i + 1) {
         // 範囲外のノードを参照
-        assert!(db.get_values_with_hashes(0, j).unwrap().is_none());
-        assert!(db.get_values_with_hashes(n + 1, j).unwrap().is_none());
+        assert!(query.get_values_with_hashes(0, j).unwrap().is_none());
+        assert!(query.get_values_with_hashes(n + 1, j).unwrap().is_none());
 
         if j != 0 && tree.inode(i + 1, j).is_none() {
           continue;
         }
 
         // 中間ノードを指定してそのノードに属する値をハッシュ値付きですべて参照
-        let data_set = db.get_values_with_hashes(i + 1, j).unwrap().unwrap();
+        let data_set = query.get_values_with_hashes(i + 1, j).unwrap().unwrap();
 
         // ルートハッシュを検証
         assert_eq!(db.root_hash().unwrap(), data_set.root().hash);
@@ -262,68 +295,6 @@ fn random_hash(s: u64) -> Hash {
   let mut hash = [0u8; HASH_SIZE];
   rand.fill_bytes(&mut hash);
   Hash::new(hash)
-}
-
-fn dump<T: Storage>(db: &MVHT<T>) -> String {
-  fn indent(size: usize) -> String {
-    let mut indents = String::with_capacity(size * 2);
-    for _ in 0..size {
-      indents = indents.add("  ");
-    }
-    indents
-  }
-  fn node<C: io::Read + io::Seek>(r: &mut C, idt: usize, addr: &Address) -> String {
-    r.seek(SeekFrom::Start(addr.position)).unwrap();
-    let entry = read_entry_without_check(r, addr.position, 0).unwrap();
-    if addr.j == 0 {
-      let enode = entry.enode;
-      format!(
-        "{{\n{}i: {}, j: {}, position: {},\n{}hash: 0x{}, hash_length: {},\n{}payload: 0x{}, payload_length: {},\n{}}}",
-        indent(idt + 1),
-        enode.meta.address.i,
-        enode.meta.address.j,
-        enode.meta.address.position,
-        indent(idt + 1),
-        hex(&enode.meta.hash.value),
-        enode.meta.hash.value.len(),
-        indent(idt + 1),
-        hex(&enode.payload),
-        enode.payload.len(),
-        indent(idt)
-      )
-    } else if let Some(inode) = entry.inodes.iter().find(|n| n.meta.address.j == addr.j) {
-      let left = node(r, idt + 1, &inode.left);
-      let right = node(r, idt + 1, &inode.right);
-      format!(
-        "{{\n{}i: {}, j: {}, position: {},\n{}hash: 0x{}, hash_length: {},\n{}left: {},\n{}right: {}\n{}}}",
-        indent(idt + 1),
-        inode.meta.address.i,
-        inode.meta.address.j,
-        inode.meta.address.position,
-        indent(idt + 1),
-        hex(&inode.meta.hash.value),
-        inode.meta.hash.value.len(),
-        indent(idt + 1),
-        left,
-        indent(idt + 1),
-        right,
-        indent(idt)
-      )
-    } else {
-      "error: \"inode {:?} is not exist in the entry.\"".to_string()
-    }
-  }
-  let address = match db.root_ref() {
-    RootRef::None => None,
-    RootRef::ENode(enode) => Some(enode.meta.address),
-    RootRef::INode(inode) => Some(inode.meta.address),
-  };
-  if let Some(address) = address {
-    let mut cursor = db.storage.open(false).unwrap();
-    node(&mut cursor, 0, &address)
-  } else {
-    "".to_string()
-  }
 }
 
 /// ファイルストレージの適合テスト。
