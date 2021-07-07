@@ -4,16 +4,16 @@ use std::hash::Hasher;
 use std::io;
 use std::io::{ErrorKind, Seek};
 use std::io::{SeekFrom, Write};
-use std::path::{PathBuf, MAIN_SEPARATOR};
-use std::thread::{spawn, JoinHandle};
+use std::path::{MAIN_SEPARATOR, PathBuf};
+use std::thread::{JoinHandle, spawn};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayBuilder, Key};
 use mt19937::MT19937;
 use rand::RngCore;
 
-use crate::model::ceil_log2;
 use crate::*;
+use crate::model::ceil_log2;
 
 #[test]
 fn test_multi_threaded_query() {

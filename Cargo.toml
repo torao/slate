@@ -17,6 +17,13 @@ sha2 = "0.9"
 [dev-dependencies]
 rand = "0.8"
 mt19937 = "2.0"
+criterion = "0.3"
+leveldb = "0.8"
+db-key = "0.0"
+
+[[bench]]
+name = "mvht"
+harness = false
 
 [features]
 default = ["sha256", "panic_over_inconsistency"]
