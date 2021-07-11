@@ -1,11 +1,11 @@
-# Multi-Versioned Hash Tree
+# Logarithmic Multi-Tier Hash Tree
 <!-- 多層 multi-layer, multi-tier -->
 
-不変で木構造の完全な履歴を保持する効率的な追記指向のハッシュツリー (Merkle Tree) 構造である Multi-Versioned Hash Tree について説明
+不変で木構造の完全な履歴を保持する効率的な追記指向のハッシュツリー (Merkle Tree) 構造である Logarithmic Multi-Tier Hash Tree について説明
 します (同様のデータ構造やアルゴリズム十分に調査したわけではないが、ここで述べるアルゴリズムに関する呼称や研究などを見つけられていないため、
 ここでは MVHT という名前で呼びます)。これはログ構造のデータベースとして使用することができる。
 
-## Multi-Versioned Hash Tree の特徴
+## Logarithmic Multi-Tier Hash Tree の特徴
 
 * 時系列データのように追加のみが行われるリスト構造。
 * データの追加位置を示すインデックスにツリー構造を構築する。このツリー構造は不変であり、ハッシュツリー (Merkle Tree) として使用する
