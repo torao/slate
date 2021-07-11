@@ -1,5 +1,5 @@
 [package]
-name = "mvht"
+name = "lmtht"
 version = "0.1.0"
 authors = ["TAKAMI Torao <koiroha@gmail.com>"]
 edition = "2018"
@@ -13,6 +13,7 @@ thiserror = "1"
 byteorder = "1"
 highway = "0.6"
 sha2 = "0.9"
+clap = "2"
 
 [dev-dependencies]
 rand = "0.8"
@@ -22,7 +23,7 @@ leveldb = "0.8"
 db-key = "0.0"
 
 [[bench]]
-name = "mvht"
+name = "lmtht"
 harness = false
 
 [features]

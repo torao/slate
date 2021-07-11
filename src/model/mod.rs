@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 #[cfg(test)]
 mod test;
 
-/// MVHT がインデックス i として使用する整数の型です。`u64` を表しています。
+/// LMTHT がインデックス i として使用する整数の型です。`u64` を表しています。
 ///
 /// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
 /// ことができます。
@@ -25,7 +25,7 @@ pub const INDEX_SIZE: u8 = 64;
 #[cfg(feature = "small_index")]
 pub const INDEX_SIZE: u8 = 32;
 
-/// MVHT のアルゴリズムで使用する任意のノード b_{i,j} を表すための構造体です。
+/// LMTHT のアルゴリズムで使用する任意のノード b_{i,j} を表すための構造体です。
 ///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct Node {
@@ -39,7 +39,7 @@ impl Node {
   }
 }
 
-/// MVHT のアルゴリズムで使用する任意の中間ノードを表すための構造体です。左右の枝への分岐を含みます。
+/// LMTHT のアルゴリズムで使用する任意の中間ノードを表すための構造体です。左右の枝への分岐を含みます。
 ///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct INode {

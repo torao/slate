@@ -9,15 +9,15 @@ use leveldb::database::Database;
 use leveldb::kv::KV;
 use leveldb::options::{Options, ReadOptions, WriteOptions};
 
-use mvht::model::NthGenHashTree;
-use mvht::{Hash, Index, HASH_SIZE, MVHT, MemStorage};
+use lmtht::model::NthGenHashTree;
+use lmtht::{Hash, Index, HASH_SIZE, LMTHT, MemStorage};
 
 fn bench_append(c: &mut Criterion) {
   let file = temp_file("bench", ".db");
-  let mut db = MVHT::new(file.clone()).unwrap();
-  let mut db = MVHT::new(MemStorage::new()).unwrap();
+  let _db = LMTHT::new(file.clone()).unwrap();
+  let mut db = LMTHT::new(MemStorage::new()).unwrap();
   let data = &[0u8; 1024];
-  c.bench_function("MVHT append", |b| b.iter(|| db.append(data).unwrap()));
+  c.bench_function("LMTHT append", |b| b.iter(|| db.append(data).unwrap()));
   remove_file(&file).unwrap();
 }
 

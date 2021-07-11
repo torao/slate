@@ -6,12 +6,12 @@ pub enum Detail {
   #[error("Failed to open local file {file}; {message}")]
   FailedToOpenLocalFile { file: String, message: String },
 
-  // ストレージの内容が MVHT ではない
-  #[error("The contents of storage are not for MVHT: {message}")]
-  FileIsNotContentsOfMVHTree { message: &'static str },
+  // ストレージの内容が LMTHT ではない
+  #[error("The contents of storage are not for LMTHT: {message}")]
+  FileIsNotContentsOfLMTHTree { message: &'static str },
 
   // 互換性のないファイルバージョン
-  #[error("MVHT storage version is incompatible: {0}.{1}")]
+  #[error("LMTHT storage version is incompatible: {0}.{1}")]
   IncompatibleVersion(u8, u8),
 
   // ペイロードのサイズが大きすぎる

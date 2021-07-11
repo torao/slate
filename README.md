@@ -3,7 +3,7 @@
 
 不変で木構造の完全な履歴を保持する効率的な追記指向のハッシュツリー (Merkle Tree) 構造である Logarithmic Multi-Tier Hash Tree について説明
 します (同様のデータ構造やアルゴリズム十分に調査したわけではないが、ここで述べるアルゴリズムに関する呼称や研究などを見つけられていないため、
-ここでは MVHT という名前で呼びます)。これはログ構造のデータベースとして使用することができる。
+ここでは LMTHT という名前で呼びます)。これはログ構造のデータベースとして使用することができる。
 
 ## Logarithmic Multi-Tier Hash Tree の特徴
 
@@ -16,4 +16,4 @@
 
 ## Append
 
-![append operations from 1 to 16 on the Multi-Versioned Hash Tree](docs/mvht.gif)
+![append operations from 1 to 16 on the Logarithmic Multi-Tier Hash Tree](docs/lmtht.gif)

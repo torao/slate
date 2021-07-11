@@ -1,16 +1,16 @@
-//! `mvht` crate represents Multi-Versioned Hash Tree -- an implementation of a list structure
+//! `lmtht` crate represents Logarithmic Multi-Tier Hash Tree -- an implementation of a list structure
 //! with Hash Tree (Merkle Tree) that stores a complete history of additive changes in that tree
 //! structure, with efficient append characteristics for practical storage device. This allows
 //! data to be appended and, like a typical hash tree, can be used to verify data corruption or
 //! tampering with very small amounts of data.
 //!
-//! See also [my personal research page for more detail](https://hazm.at/mox/algorithm/structural-algorithm/mvht/index.html).
+//! See also [my personal research page for more detail](https://hazm.at/mox/algorithm/structural-algorithm/logarithmic-multi-tier-hash-tree/index.html).
 //!
 //! # Examples
 //!
 //! ```rust
-//! use mvht::{MemStorage, MVHT, Value, Node};
-//! let mut db = MVHT::new(MemStorage::new()).unwrap();
+//! use lmtht::{MemStorage, LMTHT, Value, Node};
+//! let mut db = LMTHT::new(MemStorage::new()).unwrap();
 //!
 //! // Returns None for non-existent indices.
 //! let mut query = db.query().unwrap();
@@ -67,7 +67,7 @@ pub mod model;
 #[cfg(test)]
 pub mod test;
 
-/// mvht クレートで使用する標準 Result。[`error::Detail`] も参照。
+/// lmtht クレートで使用する標準 Result。[`error::Detail`] も参照。
 pub type Result<T> = std::result::Result<T, error::Detail>;
 
 /// ハッシュ木を保存する抽象化されたストレージです。read 用または read + write 用のカーソル参照を実装することで
@@ -179,7 +179,7 @@ pub trait Cursor: io::Seek + io::Read + io::Write {}
 
 impl Cursor for File {}
 
-/// MVHT がインデックス i として使用する整数の型です。`u64` を表しています。
+/// LMTHT がインデックス i として使用する整数の型です。`u64` を表しています。
 ///
 /// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
 /// ことができます。
@@ -473,7 +473,7 @@ const CHECKSUM_HW64_KEY: [u64; 4] = [0xFA5015F2E22BCFC6u64, 0xCE5A4ED9A4025C80, 
 ///
 pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
 
-/// MVHT ファイルの先頭に記録される 3 バイトの識別子を表す定数です。値は Unicode でのdeciduous tree 🌲 (U+1F332)
+/// LMTHT ファイルの先頭に記録される 3 バイトの識別子を表す定数です。値は Unicode でのdeciduous tree 🌲 (U+1F332)
 /// に由来します。
 pub const STORAGE_IDENTIFIER: [u8; 3] = [0x01u8, 0xF3, 0x33];
 
@@ -537,14 +537,14 @@ impl Cache {
   }
 }
 
-/// ストレージ上に直列化された Multi-Versioned Hash Tree を表す木構造に対する操作を実装します。
-pub struct MVHT<S: Storage> {
+/// ストレージ上に直列化された Logarithmic Multi-Tier Hash Tree を表す木構造に対する操作を実装します。
+pub struct LMTHT<S: Storage> {
   storage: Box<S>,
   latest_cache: Arc<Cache>,
 }
 
-impl<S: Storage> MVHT<S> {
-  /// 指定された [`Storage`] に直列化されたハッシュ木を保存する MVHT を構築します。
+impl<S: Storage> LMTHT<S> {
+  /// 指定された [`Storage`] に直列化されたハッシュ木を保存する LMTHT を構築します。
   ///
   /// ストレージに [`std::path::Path`] や [`std::path::PathBuf`] のようなパスを指定したするとそのファイルに
   /// 直列化されたハッシュ木を保存します。テストや検証目的ではメモリ上にハッシュ木を直列化する [`MemStorage`] を
@@ -555,26 +555,26 @@ impl<S: Storage> MVHT<S> {
   /// 以下はシステムのテンポラリディレクトリ上の `mbht-example.db` にハッシュ木を直列化する例です。
   ///
   /// ```rust
-  /// use mvht::{MVHT,Storage,Result};
+  /// use lmtht::{LMTHT,Storage,Result};
   /// use std::env::temp_dir;
   /// use std::fs::remove_file;
   /// use std::path::PathBuf;
   ///
   /// fn append_and_get(file: &PathBuf) -> Result<()>{
-  ///   let mut db = MVHT::new(file)?;
+  ///   let mut db = LMTHT::new(file)?;
   ///   let root = db.append(&vec![0u8, 1, 2, 3])?;
   ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.query()?.get(root.i)?);
   ///   Ok(())
   /// }
   ///
   /// let mut path = temp_dir();
-  /// path.push("mvht-example.db");
+  /// path.push("lmtht-example.db");
   /// append_and_get(&path).expect("test failed");
   /// remove_file(path.as_path()).unwrap();
   /// ```
-  pub fn new(storage: S) -> Result<MVHT<S>> {
+  pub fn new(storage: S) -> Result<LMTHT<S>> {
     let gen_cache = Arc::new(Cache::from_entry(None));
-    let mut db = MVHT { storage: Box::new(storage), latest_cache: gen_cache };
+    let mut db = LMTHT { storage: Box::new(storage), latest_cache: gen_cache };
     db.init()?;
     Ok(db)
   }
@@ -589,12 +589,12 @@ impl<S: Storage> MVHT<S> {
     self.latest_cache.n()
   }
 
-  /// この MVHT の現在の高さを参照します。ノードが一つも含まれていない場合は 0 を返します。
+  /// この LMTHT の現在の高さを参照します。ノードが一つも含まれていない場合は 0 を返します。
   pub fn height(&self) -> u8 {
     self.root().map(|root| root.j).unwrap_or(0)
   }
 
-  /// この MVHT のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
+  /// この LMTHT のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
   pub fn root_hash(&self) -> Option<Hash> {
     self.root().map(|root| root.hash)
   }
@@ -612,14 +612,14 @@ impl<S: Storage> MVHT<S> {
         cursor.write_all(&STORAGE_IDENTIFIER)?;
         cursor.write_u8(STORAGE_VERSION)?;
       }
-      1..=3 => return Err(FileIsNotContentsOfMVHTree { message: "bad magic number" }),
+      1..=3 => return Err(FileIsNotContentsOfLMTHTree { message: "bad magic number" }),
       _ => {
         // マジックナンバーの確認
         let mut buffer = [0u8; 4];
         cursor.seek(io::SeekFrom::Start(0))?;
         cursor.read_exact(&mut buffer)?;
         if buffer[..3] != STORAGE_IDENTIFIER[..] {
-          return Err(FileIsNotContentsOfMVHTree { message: "bad magic number" });
+          return Err(FileIsNotContentsOfLMTHTree { message: "bad magic number" });
         } else if !is_version_compatible(buffer[3]) {
           return Err(IncompatibleVersion(buffer[3] >> 4, buffer[3] & 0x0F));
         }
@@ -651,7 +651,7 @@ impl<S: Storage> MVHT<S> {
     Ok(())
   }
 
-  /// 指定された値をこの MVHT に追加します。
+  /// 指定された値をこの LMTHT に追加します。
   ///
   /// # Returns
   /// この操作によって更新されたルートノードを返します。このルートノードは新しい木構造のルートハッシュである
@@ -759,10 +759,10 @@ impl Query {
   ///
   /// # Example
   /// ```rust
-  /// use mvht::{MVHT, MemStorage, Hash};
-  /// use mvht::model::{range, is_pbst};
+  /// use lmtht::{LMTHT, MemStorage, Hash};
+  /// use lmtht::model::{range, is_pbst};
   ///
-  /// let mut db = MVHT::new(MemStorage::new()).unwrap();
+  /// let mut db = LMTHT::new(MemStorage::new()).unwrap();
   /// let mut latest_root_hash = Hash::hash(&vec![]);
   /// for i in 0u32..100 {
   ///   let current_root = db.append(&i.to_le_bytes()).unwrap();
