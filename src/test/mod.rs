@@ -4,16 +4,16 @@ use std::hash::Hasher;
 use std::io;
 use std::io::{ErrorKind, Seek};
 use std::io::{SeekFrom, Write};
-use std::path::{MAIN_SEPARATOR, PathBuf};
-use std::thread::{JoinHandle, spawn};
+use std::path::{PathBuf, MAIN_SEPARATOR};
+use std::thread::{spawn, JoinHandle};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayBuilder, Key};
 use mt19937::MT19937;
 use rand::RngCore;
 
-use crate::*;
 use crate::model::ceil_log2;
+use crate::*;
 
 #[test]
 fn test_multi_threaded_query() {
@@ -115,7 +115,7 @@ fn test_bootstrap() {
   // 空のストレージを指定してファイル識別子が出力されることを確認
   let buffer = Arc::new(RwLock::new(Vec::<u8>::with_capacity(4 * 1024)));
   let storage = MemStorage::with(buffer.clone());
-  let db = LMTHT::new(storage).unwrap();
+  let db = BHT::new(storage).unwrap();
   let content = buffer.read().unwrap();
   let mut session = db.query().unwrap();
   assert_eq!(None, db.root());
@@ -135,7 +135,7 @@ fn test_bootstrap() {
     write_entry(&mut buffer, &entry).unwrap();
     let buffer = Arc::new(RwLock::new(buffer));
     let storage = MemStorage::with(buffer.clone());
-    let db = LMTHT::new(storage).unwrap();
+    let db = BHT::new(storage).unwrap();
     let last = entry.inodes.last().map(|i| i.meta).unwrap_or(entry.enode.meta);
     assert_eq!(Some(Node::new(last.address.i, last.address.j, last.hash)), db.root());
   }
@@ -213,11 +213,11 @@ fn test_get_values_with_hashes() {
   }
 }
 
-/// n 個の要素を持つ LMTHT を構築します。それぞれの要素は乱数で初期化された `payload_size` サイズの値を持ちます。
-fn prepare_db(n: u64, payload_size: usize) -> LMTHT<MemStorage> {
+/// n 個の要素を持つ BHT を構築します。それぞれの要素は乱数で初期化された `payload_size` サイズの値を持ちます。
+fn prepare_db(n: u64, payload_size: usize) -> BHT<MemStorage> {
   let buffer = Arc::new(RwLock::new(Vec::<u8>::with_capacity(4 * 1024)));
   let storage = MemStorage::with(buffer.clone());
-  let mut db = LMTHT::new(storage).unwrap();
+  let mut db = BHT::new(storage).unwrap();
 
   for i in 0..n {
     let value = random_payload(payload_size, i + 1);
@@ -300,15 +300,15 @@ fn random_hash(s: u64) -> Hash {
 /// ファイルストレージの適合テスト。
 #[test]
 fn test_file_storage() {
-  let file = temp_file("lmtht-storage", ".db");
-  verify_storage_spec(&file).expect(&format!("LMTHT compliance test filed: {}", file.to_string_lossy()));
+  let file = temp_file("bht-storage", ".db");
+  verify_storage_spec(&file).expect(&format!("BHT compliance test filed: {}", file.to_string_lossy()));
   remove_file(file.to_path_buf()).expect(&format!("failed to remove temporary file: {}", file.to_string_lossy()));
 }
 
 /// メモリーストレージの適合テスト
 #[test]
 fn test_memory_storage() {
-  verify_storage_spec(&MemStorage::new()).expect("LMTHT compliance test filed");
+  verify_storage_spec(&MemStorage::new()).expect("BHT compliance test filed");
 }
 
 /// 指定されたストレージが仕様に準拠していることを検証します。

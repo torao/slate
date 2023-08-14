@@ -1,16 +1,18 @@
-use clap;
+use clap::{arg, Command};
 
 fn main() {
-  let matches = clap::App::new("Logarithmic Multi-Tier Hash Tree")
-    .version("1.0.0")
-    .author("TAKAMI Torao <koiroha@gmail.com>")
-    .arg(
-      clap::Arg::with_name("DATABASE")
-        .required(true)
-        .help("database")
-    )
+  let matches = Command::new("Banded Hash Tree")
+    .name(env!("CARGO_PKG_NAME"))
+    .version(env!("CARGO_PKG_VERSION"))
+    .author(env!("CARGO_PKG_AUTHORS"))
+    .about(env!("CARGO_PKG_DESCRIPTION"))
+    .arg(arg!(<DATABASE>).required(true).help("Database to be operated."))
+    .arg(arg!(<COMMAND>).required(false).help("A command to be executed against the database."))
     .get_matches();
-  if let Some(db) = matches.value_of("DATABASE") {
-    println!("DATABASE: {}", db);
+  let db = matches.get_one::<String>("DATABASE").unwrap();
+  match matches.get_one::<String>("COMMAND") {
+    Some(cmd) => println!("COMMAND: {}", cmd),
+    None => println!("COMMAND: query"),
   }
+  println!("DATABASE: {}", db);
 }

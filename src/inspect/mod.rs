@@ -3,7 +3,7 @@ use std::hash::Hasher;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use highway::{HighwayBuilder, Key};
+use highway::{HighwayHasher, Key};
 
 use crate::checksum::HashRead;
 use crate::{hex, is_version_compatible, Hash, Result, CHECKSUM_HW64_KEY, HASH_SIZE, STORAGE_IDENTIFIER};
@@ -35,7 +35,7 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
   let mut hash = [0u8; HASH_SIZE];
   while cursor.stream_position()? < eof {
     let position = cursor.stream_position()?;
-    let mut hasher = HighwayBuilder::new(Key(CHECKSUM_HW64_KEY));
+    let mut hasher = HighwayHasher::new(Key(CHECKSUM_HW64_KEY));
     let mut r = HashRead::new(cursor, &mut hasher);
 
     // エントリ
