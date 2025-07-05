@@ -1,7 +1,7 @@
 use std::iter::FromIterator;
 
-use crate::model::{ceil_log2, floor_log2, Node, NthGenHashTree, Path, Step};
 use crate::Index;
+use crate::model::{Node, NthGenHashTree, Path, Step, ceil_log2, floor_log2};
 
 #[test]
 #[should_panic]
@@ -65,22 +65,22 @@ fn test_generation() {
     post_pbt(33),
     pre_pbt(64),
   ] {
-    let gen = NthGenHashTree::new(n);
-    assert_eq!(n, gen.n());
+    let generation = NthGenHashTree::new(n);
+    assert_eq!(n, generation.n());
 
     // 一過性の中間ノード
     let expected = ephemeral_js.iter().map(|j| Node::new(n, *j)).collect::<Vec<Node>>();
-    let actual = Vec::from_iter(gen.ephemeral_nodes().map(|i| i.node));
+    let actual = Vec::from_iter(generation.ephemeral_nodes().map(|i| i.node));
     assert_eq!(expected, actual);
 
     // 完全二分木のルートノード
     let expected = pbst_roots.iter().map(|(i, j)| Node::new(*i, *j)).collect::<Vec<Node>>();
-    let actual = gen.pbst_roots().map(|i| *i).collect::<Vec<Node>>();
+    let actual = generation.pbst_roots().map(|i| *i).collect::<Vec<Node>>();
     assert_eq!(expected, actual);
 
     // n-th 世代の中間ノード
     let expected = inode_js.iter().map(|j| Node::new(n, *j)).collect::<Vec<Node>>();
-    let actual = gen.inodes().iter().map(|i| i.node).collect::<Vec<Node>>();
+    let actual = generation.inodes().iter().map(|i| i.node).collect::<Vec<Node>>();
     assert_eq!(expected, actual);
   }
 }
@@ -98,7 +98,7 @@ fn test_generation_root() {
 fn test_generation_path_to() {
   let path = |i: u64, steps: Vec<((Index, u8), (Index, u8))>| -> Path {
     let steps =
-      steps.iter().map(|s| Step { step: Node::new(s.0 .0, s.0 .1), neighbor: Node::new(s.1 .0, s.1 .1) }).collect();
+      steps.iter().map(|s| Step { step: Node::new(s.0.0, s.0.1), neighbor: Node::new(s.1.0, s.1.1) }).collect();
     Path { root: Node::new(i, ceil_log2(i)), steps }
   };
   let mut cases = vec![
@@ -115,15 +115,15 @@ fn test_generation_path_to() {
   ];
   cases.append(ns().map(|i| (i, (i, ceil_log2(i)), path(i, vec![]))).collect::<Vec<(u64, (u64, u8), Path)>>().as_mut());
   for (n, (i, j), expected) in cases {
-    let gen = NthGenHashTree::new(n);
-    let actual = gen.path_to(i, j).unwrap();
+    let generation = NthGenHashTree::new(n);
+    let actual = generation.path_to(i, j).unwrap();
     assert_eq!(expected, actual)
   }
 
   // 範囲外の中間ノードを指定した場合
   for (n, j) in vec![(1, 1), (1, 2), (2, 2), (3, 3), (4, 3)] {
-    let gen = NthGenHashTree::new(n);
-    assert_eq!(None, gen.path_to(n, j));
+    let generation = NthGenHashTree::new(n);
+    assert_eq!(None, generation.path_to(n, j));
   }
 
   // 存在しない一過性の中間ノードを指定した場合
@@ -145,8 +145,8 @@ fn test_generation_path_to() {
     (14, 2),
     (15, 1),
   ] {
-    let gen = NthGenHashTree::new(n);
-    assert_eq!(None, gen.path_to(n, j));
+    let generation = NthGenHashTree::new(n);
+    assert_eq!(None, generation.path_to(n, j));
   }
 }
 

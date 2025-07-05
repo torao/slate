@@ -6,7 +6,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use highway::{HighwayHasher, Key};
 
 use crate::checksum::HashRead;
-use crate::{hex, is_version_compatible, Hash, Result, CHECKSUM_HW64_KEY, HASH_SIZE, STORAGE_IDENTIFIER};
+use crate::{CHECKSUM_HW64_KEY, HASH_SIZE, Hash, Result, STORAGE_IDENTIFIER, hex, is_version_compatible};
 
 pub trait SeekRead: Seek + std::io::Read {}
 

@@ -1,16 +1,16 @@
 use std::env::temp_dir;
-use std::fs::{create_dir_all, remove_dir_all, remove_file, OpenOptions};
+use std::fs::{OpenOptions, create_dir_all, remove_dir_all, remove_file};
 use std::io::{ErrorKind, Write};
-use std::path::{PathBuf, MAIN_SEPARATOR};
+use std::path::{MAIN_SEPARATOR, PathBuf};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use db_key::Key;
 use leveldb::database::Database;
 use leveldb::kv::KV;
 use leveldb::options::{Options, ReadOptions, WriteOptions};
 
 use slate::model::NthGenHashTree;
-use slate::{Hash, Index, MemStorage, Slate, HASH_SIZE};
+use slate::{HASH_SIZE, Hash, Index, MemStorage, Slate};
 
 fn bench_append(c: &mut Criterion) {
   let file = temp_file("bench", ".db");
@@ -42,9 +42,9 @@ fn bench_level_db(c: &mut Criterion) {
         db.put(write_option, KEY(key), &hash.value).unwrap();
 
         // 中間ノードのハッシュ値の保存
-        let gen = NthGenHashTree::new(i as u64);
+        let generation = NthGenHashTree::new(i as u64);
         let mut right_hash = hash;
-        for inode in gen.inodes().iter() {
+        for inode in generation.inodes().iter() {
           let key = format!("hash{}_{}", inode.left.i, inode.left.j);
           let read_option = ReadOptions::new();
           let left_hash = db.get_bytes(read_option, &KEY(key)).unwrap().unwrap();

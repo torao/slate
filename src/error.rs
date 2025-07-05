@@ -31,7 +31,9 @@ pub enum Detail {
   IncorrectEntryHeadOffset { expected: u32, actual: u64 },
 
   // チェックサム検査に失敗
-  #[error("DAMAGED STORAGE: checksum verification failed for {length} bytes starting at {at}; expected {expected} but got {actual}")]
+  #[error(
+    "DAMAGED STORAGE: checksum verification failed for {length} bytes starting at {at}; expected {expected} but got {actual}"
+  )]
   ChecksumVerificationFailed { at: u64, length: u32, expected: u64, actual: u64 },
 
   // ノードの読み出し位置が不正

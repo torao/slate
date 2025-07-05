@@ -57,7 +57,7 @@ use highway::{HighwayHasher, Key};
 use crate::checksum::{HashRead, HashWrite};
 use crate::error::Detail;
 use crate::error::Detail::*;
-use crate::model::{range, NthGenHashTree};
+use crate::model::{NthGenHashTree, range};
 
 pub(crate) mod checksum;
 pub mod error;
@@ -512,11 +512,7 @@ impl Cache {
   }
 
   fn last_entry(&self) -> Option<&Entry> {
-    if let Some(CacheInner { last_entry, .. }) = &self.0 {
-      Some(last_entry)
-    } else {
-      None
-    }
+    if let Some(CacheInner { last_entry, .. }) = &self.0 { Some(last_entry) } else { None }
   }
 
   fn root(&self) -> Option<Node> {
@@ -674,8 +670,8 @@ impl<S: Storage> Slate<S> {
     // 中間ノードの構築
     let mut inodes = Vec::<INode>::with_capacity(INDEX_SIZE as usize);
     let mut right_hash = enode.meta.hash;
-    let gen = NthGenHashTree::new(i);
-    let mut right_to_left_inodes = gen.inodes();
+    let generation = NthGenHashTree::new(i);
+    let mut right_to_left_inodes = generation.inodes();
     right_to_left_inodes.reverse();
     for n in right_to_left_inodes.iter() {
       debug_assert_eq!(i, n.node.i);
@@ -705,32 +701,32 @@ impl<S: Storage> Slate<S> {
     write_entry(&mut cursor, &entry)?;
 
     // キャッシュを更新
-    self.latest_cache = Arc::new(Cache::new(entry, gen));
+    self.latest_cache = Arc::new(Cache::new(entry, generation));
 
     Ok(Node::new(i, j, root_hash))
   }
 
   pub fn query(&self) -> Result<Query> {
     let cursor = self.storage.open(false)?;
-    let gen = self.latest_cache.clone();
-    Ok(Query { cursor, gen })
+    let generation = self.latest_cache.clone();
+    Ok(Query { cursor, generation })
   }
 }
 
 pub struct Query {
   cursor: Box<dyn Cursor>,
-  gen: Arc<Cache>,
+  generation: Arc<Cache>,
 }
 
 impl Query {
   /// このクエリーが対象としている木構造の世代を参照します。
   pub fn n(&self) -> Index {
-    self.gen.n()
+    self.generation.n()
   }
 
   /// 範囲外のインデックス (0 を含む) を指定した場合は `None` を返します。
   pub fn get(&mut self, i: Index) -> Result<Option<Vec<u8>>> {
-    if let Some(node) = Self::get_node(self.gen.as_ref(), &mut self.cursor, i, 0)? {
+    if let Some(node) = Self::get_node(self.generation.as_ref(), &mut self.cursor, i, 0)? {
       self.cursor.seek(io::SeekFrom::Start(node.address.position))?;
       let entry = read_entry_without_check(&mut self.cursor, node.address.position, node.address.i)?;
       let Entry { enode: ENode { payload, .. }, .. } = entry;
@@ -779,7 +775,7 @@ impl Query {
   /// ```
   ///
   pub fn get_values_with_hashes(&mut self, i: Index, j: u8) -> Result<Option<ValuesWithBranches>> {
-    let (last_entry, model) = if let Some(CacheInner { last_entry, model }) = &self.gen.0 {
+    let (last_entry, model) = if let Some(CacheInner { last_entry, model }) = &self.generation.0 {
       if i == 0 || i > model.n() {
         return Ok(None);
       }
@@ -787,7 +783,7 @@ impl Query {
     } else {
       return Ok(None);
     };
-    let root = match self.gen.root_ref() {
+    let root = match self.generation.root_ref() {
       RootRef::INode(inode) => *inode,
       RootRef::ENode(enode) => {
         self.cursor.seek(SeekFrom::Start(enode.meta.address.position))?;
@@ -871,8 +867,8 @@ impl Query {
     Ok(Some(ValuesWithBranches::new(values, branches)))
   }
 
-  fn get_node(gen: &Cache, cursor: &mut Box<dyn Cursor>, i: Index, j: u8) -> Result<Option<MetaInfo>> {
-    if let Some((position, _)) = Self::get_entry_position(gen, cursor, i, false)? {
+  fn get_node(generation: &Cache, cursor: &mut Box<dyn Cursor>, i: Index, j: u8) -> Result<Option<MetaInfo>> {
+    if let Some((position, _)) = Self::get_entry_position(generation, cursor, i, false)? {
       cursor.seek(io::SeekFrom::Start(position))?;
       if j == 0 {
         let entry = read_entry_without_check(cursor, position, i)?;
@@ -916,12 +912,12 @@ impl Query {
 
   /// `i` 番目のエントリの位置を参照します。この検索は現在のルートノードを基準にした探索を行います。
   fn get_entry_position(
-    gen: &Cache,
+    generation: &Cache,
     cursor: &mut Box<dyn Cursor>,
     i: Index,
     with_branch: bool,
   ) -> Result<Option<(Index, Vec<MetaInfo>)>> {
-    match &gen.root_ref() {
+    match &generation.root_ref() {
       RootRef::INode(root) => {
         let root = *(*root);
         search_entry_position(cursor, &root, i, with_branch)
