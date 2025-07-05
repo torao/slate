@@ -212,7 +212,7 @@ impl NthGenHashTree {
 
   #[inline]
   fn pbst_inode(i: Index, j: u8) -> INode {
-    debug_assert!(is_pbst(i, j), "({}, {}) is not a PBST", i, j);
+    debug_assert!(is_pbst(i, j), "({i}, {j}) is not a PBST");
     debug_assert_ne!(0, j, "({i}, {j}) is a leaf node, not a inode");
     INode::new(Node::new(i, j), Node::new(i - (1 << (j - 1)), j - 1), Node::new(i, j - 1))
   }
