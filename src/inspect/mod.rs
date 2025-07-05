@@ -17,7 +17,7 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
 
   let eval = |f: bool| if f { '✔' } else { '❌' };
   let eval_with_msg =
-    |f: bool, msg: String| format!("{}{}", eval(f), if !f { format!("; {}", msg) } else { "".to_string() });
+    |f: bool, msg: String| format!("{}{}", eval(f), if !f { format!("; {msg}") } else { "".to_string() });
 
   // 識別子の読み込み
   let mut identifier = [0u8; 4];
@@ -58,8 +58,7 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
 
     // 葉ノード
     let payload_len = r.read_u32::<LittleEndian>()?;
-    let mut payload = Vec::<u8>::with_capacity(payload_len as usize);
-    unsafe { payload.set_len(payload_len as usize) };
+    let mut payload = vec![0u8; payload_len as usize];
     r.read_exact(payload.as_mut_slice())?;
     r.read_exact(&mut hash)?;
     hashes.insert((i, 0), Hash::new(hash));
@@ -71,10 +70,10 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
     let checksum = cursor.read_u64::<LittleEndian>()?;
 
     println!("--------");
-    println!("ENTRY: {} @{}", i, position);
+    println!("ENTRY: {i} @{position}");
     let mut prev_j = 0;
     for (j, left_position, left_i, left_j, hash) in inodes.iter() {
-      println!("INODE: ({}, {})", i, j);
+      println!("INODE: ({i}, {j})");
       println!(
         "  LEFT : ({}, {}) @{} {}",
         left_i,
@@ -91,7 +90,7 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
       );
       let hl = hashes.get(&(*left_i, *left_j));
       let hr = hashes.get(&(i, prev_j));
-      let h = hl.map(|hl| hr.map(|hr| hl.combine(hr))).flatten();
+      let h = hl.and_then(|hl| hr.map(|hr| hl.combine(hr)));
       let msg = format!(
         "hash({} || {}) = {}",
         hl.map(|hl| hex(&hl.value)).unwrap_or_default(),
@@ -106,19 +105,20 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
       );
       prev_j = *j;
     }
-    println!("ENODE: ({}, 0)", i);
+    println!("ENODE: ({i}, 0)");
     let payload_hex = hex(&payload);
     let payload_hex = if payload_hex.len() > 32 + 32 {
-      format!(
-        "{}...{}",
-        payload_hex[0..32].to_string(),
-        payload_hex[payload_hex.len() - 32..payload_hex.len()].to_string()
-      )
+      format!("{}...{}", &payload_hex[0..32], &payload_hex[payload_hex.len() - 32..payload_hex.len()])
     } else {
       payload_hex
     };
     println!("  PAYLOAD: {} ({} bytes) {}", payload_hex, payload.len(), eval(payload_len == payload.len() as u32));
-    println!("  HASH   : {} ({} bytes) {}", hex(&hash), hash.len(), eval(Hash::hash(&payload) == Hash::new(hash)));
+    println!(
+      "  HASH   : {} ({} bytes) {}",
+      hex(&hash),
+      hash.len(),
+      eval(Hash::from_bytes(&payload) == Hash::new(hash))
+    );
     println!("OFFSET   : {} {}", offset, eval(trailer_position - offset as u64 == position));
     println!("CHECKSUM : {} {}", hex(&checksum.to_le_bytes()), eval(checksum == actual_checksum));
   }
@@ -137,7 +137,7 @@ pub fn hex_dump(r: &mut dyn Read) -> Result<()> {
       match r.read_u8() {
         Ok(ch) => {
           ascii.push((if (ch as char).is_ascii_graphic() { ch as char } else { '.' }).to_string());
-          hex.push(format!("{:02X}", ch));
+          hex.push(format!("{ch:02X}"));
         }
         Err(err) => {
           error = Some(err);
@@ -155,7 +155,7 @@ pub fn hex_dump(r: &mut dyn Read) -> Result<()> {
 
   let error = error.unwrap();
   if error.kind() != ErrorKind::UnexpectedEof {
-    println!("ERROR: {}", error);
+    println!("ERROR: {error}");
   }
   Ok(())
 }

@@ -1,7 +1,7 @@
 use clap::{arg, Command};
 
 fn main() {
-  let matches = Command::new("Banded Hash Tree")
+  let matches = Command::new("Slate")
     .name(env!("CARGO_PKG_NAME"))
     .version(env!("CARGO_PKG_VERSION"))
     .author(env!("CARGO_PKG_AUTHORS"))
@@ -11,8 +11,8 @@ fn main() {
     .get_matches();
   let db = matches.get_one::<String>("DATABASE").unwrap();
   match matches.get_one::<String>("COMMAND") {
-    Some(cmd) => println!("COMMAND: {}", cmd),
+    Some(cmd) => println!("COMMAND: {cmd}"),
     None => println!("COMMAND: query"),
   }
-  println!("DATABASE: {}", db);
+  println!("DATABASE: {db}");
 }

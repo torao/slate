@@ -1,5 +1,5 @@
 [package]
-name = "bht"
+name = "slate"
 version = "0.1.0"
 authors = ["TAKAMI Torao <koiroha@gmail.com>"]
 edition = "2018"
@@ -20,10 +20,10 @@ rand = "0.8"
 mt19937 = "2.0"
 criterion = "0.5"
 leveldb = "0.8"
-db-key = "0.1"
+db-key = "0.0.5"    # Match the version used by leveldb 0.8
 
 [[bench]]
-name = "bht"
+name = "slate"
 harness = false
 
 [features]
@@ -35,3 +35,4 @@ sha512 = []
 sha512_224 = []
 sha512_256 = []
 panic_over_inconsistency = []
+small_index = []

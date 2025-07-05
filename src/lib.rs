@@ -1,16 +1,16 @@
-//! `bht` crate represents Banded Hash Tree -- an implementation of a list structure with Hash Tree
-//! (Merkle Tree) that stores a complete history of additive changes in that tree structure, with
-//! efficient append characteristics for practical storage device. This allows data to be appended
-//! and, like a typical hash tree, can be used to verify data corruption or tampering with very
-//! small amounts of data.
+//! `slate` crate represents Stratified Hash Tree -- an implementation of a list structure with Hash
+//! Tree (Merkle Tree) that stores a complete history of additive changes in that tree structure,
+//! with efficient append characteristics for practical storage device. This allows data to be
+//! appended and, like a typical hash tree, can be used to verify data corruption or tampering with
+//! very small amounts of data.
 //!
-//! See also [my personal research page for more detail](https://hazm.at/mox/algorithm/structural-algorithm/banded-hash-tree/index.html).
+//! See also [my personal research page for more detail](https://hazm.at/mox/algorithm/structural-algorithm/stratified-hash-tree/index.html).
 //!
 //! # Examples
 //!
 //! ```rust
-//! use bht::{MemStorage, BHT, Value, Node};
-//! let mut db = BHT::new(MemStorage::new()).unwrap();
+//! use slate::{MemStorage, Slate, Value, Node};
+//! let mut db = Slate::new(MemStorage::new()).unwrap();
 //!
 //! // Returns None for non-existent indices.
 //! let mut query = db.query().unwrap();
@@ -67,7 +67,7 @@ pub mod model;
 #[cfg(test)]
 pub mod test;
 
-/// bht クレートで使用する標準 Result。[`error::Detail`] も参照。
+/// slate クレートで使用する標準 Result。[`error::Detail`] も参照。
 pub type Result<T> = std::result::Result<T, error::Detail>;
 
 /// ハッシュ木を保存する抽象化されたストレージです。read 用または read + write 用のカーソル参照を実装することで
@@ -107,6 +107,12 @@ impl MemStorage {
   /// 外部からストレージの内容を参照することを想定しています。
   pub fn with(buffer: Arc<RwLock<Vec<u8>>>) -> MemStorage {
     MemStorage { buffer }
+  }
+}
+
+impl Default for MemStorage {
+  fn default() -> Self {
+    Self::new()
   }
 }
 
@@ -171,7 +177,7 @@ impl io::Write for MemCursor {
 /// `LockResult` を `io::Result` に変換します。
 #[inline]
 fn lock2io<T>(result: LockResult<T>) -> io::Result<T> {
-  result.map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))
+  result.map_err(|err| io::Error::other(err.to_string()))
 }
 
 /// ストレージからデータの入出力を行うためのカーソルです。
@@ -179,7 +185,7 @@ pub trait Cursor: io::Seek + io::Read + io::Write {}
 
 impl Cursor for File {}
 
-/// BHT がインデックス i として使用する整数の型です。`u64` を表しています。
+/// slate がインデックス i として使用する整数の型です。`u64` を表しています。
 ///
 /// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
 /// ことができます。
@@ -208,7 +214,7 @@ impl Node {
     Node { i, j, hash }
   }
   fn for_node(node: &MetaInfo) -> Node {
-    Self::new(node.address.i, node.address.j, node.hash.clone())
+    Self::new(node.address.i, node.address.j, node.hash)
   }
 
   /// このノードを左枝、`right` ノードを右枝とする親ノードを算出します。
@@ -243,7 +249,7 @@ impl Value {
   }
   /// この値のハッシュ値を算出します。
   pub fn hash(&self) -> Hash {
-    Hash::hash(&self.value)
+    Hash::from_bytes(&self.value)
   }
   pub fn to_node(&self) -> Node {
     Node::new(self.i, 0u8, self.hash())
@@ -286,7 +292,7 @@ impl ValuesWithBranches {
       for k in 0..hashes.len() / 2 {
         let left = &hashes[k * 2];
         let right = &hashes[k * 2 + 1];
-        hashes[k] = left.parent(&right);
+        hashes[k] = left.parent(right);
       }
       // 折りたたまれていない一過性の中間ノードは次に持ち越す
       let fraction = if hashes.len() % 2 != 0 {
@@ -304,7 +310,7 @@ impl ValuesWithBranches {
     for k in 0..self.branches.len() {
       let branch = &self.branches[self.branches.len() - k - 1];
       let (left, right) = if folding.i < branch.i { (&folding, branch) } else { (branch, &folding) };
-      folding = left.parent(&right);
+      folding = left.parent(right);
     }
     folding
   }
@@ -345,10 +351,9 @@ impl Hash {
   }
 
   /// 指定された値をハッシュ化します。
-  pub fn hash(value: &[u8]) -> Hash {
+  pub fn from_bytes(value: &[u8]) -> Hash {
     #[cfg(feature = "highwayhash64")]
     {
-      use highway::HighwayHash;
       let mut builder = HighwayBuilder::default();
       builder.write_all(value).unwrap();
       Hash::new(builder.finalize64().to_le_bytes())
@@ -356,15 +361,11 @@ impl Hash {
     #[cfg(not(feature = "highwayhash64"))]
     {
       use sha2::Digest;
-      #[cfg(feature = "sha224")]
-      use sha2::Sha224 as Sha2;
-      #[cfg(any(feature = "sha256"))]
+      #[cfg(feature = "sha256")]
       use sha2::Sha256 as Sha2;
-      #[cfg(feature = "sha512")]
-      use sha2::Sha512 as Sha2;
-      #[cfg(feature = "sha512/224")]
+      #[cfg(feature = "sha512_224")]
       use sha2::Sha512Trunc224 as Sha2;
-      #[cfg(feature = "sha512/256")]
+      #[cfg(feature = "sha512_256")]
       use sha2::Sha512Trunc256 as Sha2;
       let output = Sha2::digest(value);
       debug_assert_eq!(HASH_SIZE, output.len());
@@ -379,7 +380,7 @@ impl Hash {
     let mut value = [0u8; HASH_SIZE * 2];
     value[..HASH_SIZE].copy_from_slice(&self.value);
     value[HASH_SIZE..].copy_from_slice(&other.value);
-    Hash::hash(&value)
+    Hash::from_bytes(&value)
   }
 
   pub fn to_str(&self) -> String {
@@ -473,7 +474,7 @@ const CHECKSUM_HW64_KEY: [u64; 4] = [0xFA5015F2E22BCFC6u64, 0xCE5A4ED9A4025C80, 
 ///
 pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
 
-/// BHT ファイルの先頭に記録される 3 バイトの識別子を表す定数です。値は Unicode でのdeciduous tree 🌲 (U+1F332)
+/// slate ファイルの先頭に記録される 3 バイトの識別子を表す定数です。値は Unicode でのdeciduous tree 🌲 (U+1F332)
 /// に由来します。
 pub const STORAGE_IDENTIFIER: [u8; 3] = [0x01u8, 0xF3, 0x33];
 
@@ -525,10 +526,10 @@ impl Cache {
       .map(|root| Node::new(root.address.i, root.address.j, root.hash))
   }
 
-  fn root_ref<'a>(&self) -> RootRef {
+  fn root_ref(&self) -> RootRef {
     self
       .last_entry()
-      .map(|e| e.inodes.last().map(|i| RootRef::INode(i)).unwrap_or(RootRef::ENode(&e.enode)))
+      .map(|e| e.inodes.last().map(RootRef::INode).unwrap_or(RootRef::ENode(&e.enode)))
       .unwrap_or(RootRef::None)
   }
 
@@ -537,14 +538,14 @@ impl Cache {
   }
 }
 
-/// ストレージ上に直列化された Banded Hash Tree を表す木構造に対する操作を実装します。
-pub struct BHT<S: Storage> {
+/// ストレージ上に直列化された Stratified Hash Tree を表す木構造に対する操作を実装します。
+pub struct Slate<S: Storage> {
   storage: Box<S>,
   latest_cache: Arc<Cache>,
 }
 
-impl<S: Storage> BHT<S> {
-  /// 指定された [`Storage`] に直列化されたハッシュ木を保存する BHT を構築します。
+impl<S: Storage> Slate<S> {
+  /// 指定された [`Storage`] に直列化されたハッシュ木を保存する Slate を構築します。
   ///
   /// ストレージに [`std::path::Path`] や [`std::path::PathBuf`] のようなパスを指定したするとそのファイルに
   /// 直列化されたハッシュ木を保存します。テストや検証目的ではメモリ上にハッシュ木を直列化する [`MemStorage`] を
@@ -552,29 +553,29 @@ impl<S: Storage> BHT<S> {
   ///
   /// # Examples
   ///
-  /// 以下はシステムのテンポラリディレクトリ上の `mbht-example.db` にハッシュ木を直列化する例です。
+  /// 以下はシステムのテンポラリディレクトリ上の `slate-example.db` にハッシュ木を直列化する例です。
   ///
   /// ```rust
-  /// use bht::{BHT,Storage,Result};
+  /// use slate::{Slate,Storage,Result};
   /// use std::env::temp_dir;
   /// use std::fs::remove_file;
   /// use std::path::PathBuf;
   ///
   /// fn append_and_get(file: &PathBuf) -> Result<()>{
-  ///   let mut db = BHT::new(file)?;
+  ///   let mut db = Slate::new(file)?;
   ///   let root = db.append(&vec![0u8, 1, 2, 3])?;
   ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.query()?.get(root.i)?);
   ///   Ok(())
   /// }
   ///
   /// let mut path = temp_dir();
-  /// path.push("bht-example.db");
+  /// path.push("slate-example.db");
   /// append_and_get(&path).expect("test failed");
   /// remove_file(path.as_path()).unwrap();
   /// ```
-  pub fn new(storage: S) -> Result<BHT<S>> {
+  pub fn new(storage: S) -> Result<Slate<S>> {
     let gen_cache = Arc::new(Cache::from_entry(None));
-    let mut db = BHT { storage: Box::new(storage), latest_cache: gen_cache };
+    let mut db = Slate { storage: Box::new(storage), latest_cache: gen_cache };
     db.init()?;
     Ok(db)
   }
@@ -589,12 +590,12 @@ impl<S: Storage> BHT<S> {
     self.latest_cache.n()
   }
 
-  /// この BHT の現在の高さを参照します。ノードが一つも含まれていない場合は 0 を返します。
+  /// この Slate の現在の高さを参照します。ノードが一つも含まれていない場合は 0 を返します。
   pub fn height(&self) -> u8 {
     self.root().map(|root| root.j).unwrap_or(0)
   }
 
-  /// この BHT のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
+  /// この Slate のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
   pub fn root_hash(&self) -> Option<Hash> {
     self.root().map(|root| root.hash)
   }
@@ -651,7 +652,7 @@ impl<S: Storage> BHT<S> {
     Ok(())
   }
 
-  /// 指定された値をこの BHT に追加します。
+  /// 指定された値をこの Slate に追加します。
   ///
   /// # Returns
   /// この操作によって更新されたルートノードを返します。このルートノードは新しい木構造のルートハッシュである
@@ -667,7 +668,7 @@ impl<S: Storage> BHT<S> {
     // 葉ノードの構築
     let position = cursor.seek(SeekFrom::End(0))?;
     let i = self.latest_cache.root().map(|node| node.i + 1).unwrap_or(1);
-    let hash = Hash::hash(value);
+    let hash = Hash::from_bytes(value);
     let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), hash), payload: Vec::from(value) };
 
     // 中間ノードの構築
@@ -759,11 +760,11 @@ impl Query {
   ///
   /// # Example
   /// ```rust
-  /// use bht::{BHT, MemStorage, Hash};
-  /// use lmtht::model::{range, is_pbst};
+  /// use slate::{Slate, MemStorage, Hash};
+  /// use slate::model::{range, is_pbst};
   ///
-  /// let mut db = BHT::new(MemStorage::new()).unwrap();
-  /// let mut latest_root_hash = Hash::hash(&vec![]);
+  /// let mut db = Slate::new(MemStorage::new()).unwrap();
+  /// let mut latest_root_hash = Hash::from_bytes(&vec![]);
   /// for i in 0u32..100 {
   ///   let current_root = db.append(&i.to_le_bytes()).unwrap();
   ///   latest_root_hash = current_root.hash;
@@ -845,7 +846,7 @@ impl Query {
       }
 
       if next.j == 0 {
-        debug_assert_eq!((i, j), (next.i, next.j), "branch={:?}", branch);
+        debug_assert_eq!((i, j), (next.i, next.j), "branch={branch:?}");
         self.cursor.seek(SeekFrom::Start(next.position))?;
         let Entry { enode: ENode { payload, .. }, .. } =
           read_entry_without_check(&mut self.cursor, next.position, next.i)?;
@@ -922,7 +923,7 @@ impl Query {
   ) -> Result<Option<(Index, Vec<MetaInfo>)>> {
     match &gen.root_ref() {
       RootRef::INode(root) => {
-        let root = (*root).clone();
+        let root = *(*root);
         search_entry_position(cursor, &root, i, with_branch)
       }
       RootRef::ENode(root) if root.meta.address.i == i => Ok(Some((root.meta.address.position, vec![]))),
@@ -986,8 +987,7 @@ fn read_entry_without_check(r: &mut dyn io::Read, position: u64, i_expected: Ind
 
   // 葉ノードの読み込み
   let payload_size = r.read_u32::<LittleEndian>()? & MAX_PAYLOAD_SIZE as u32;
-  let mut payload = Vec::<u8>::with_capacity(payload_size as usize);
-  unsafe { payload.set_len(payload_size as usize) };
+  let mut payload = vec![0u8; payload_size as usize];
   r.read_exact(&mut payload)?;
   r.read_exact(&mut hash)?;
   let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), Hash::new(hash)), payload };
@@ -1079,7 +1079,7 @@ where
   }
 
   let mut branches = Vec::<MetaInfo>::with_capacity(INDEX_SIZE as usize);
-  let mut mover = root.clone();
+  let mut mover = *root;
   for _ in 0..INDEX_SIZE {
     // 次のノードのアドレスを参照
     let next = if i <= mover.left.i {
@@ -1116,7 +1116,7 @@ where
     let inodes = read_inodes(r, addr.position)?;
     let inode = inodes.iter().find(|inode| inode.meta.address.j == addr.j);
     if let Some(inode) = inode {
-      Ok(inode.clone())
+      Ok(*inode)
     } else {
       // 内部の木構造とストレージ上のデータが矛盾している
       inconsistency(format!("entry i={} in storage doesn't contain an inode at specified level j={}", addr.i, addr.j))
@@ -1133,7 +1133,7 @@ where
         let entry = read_entry_without_check(r, addr.position, addr.i)?;
         entry.enode.meta
       } else {
-        read_inode(r, &addr)?.meta
+        read_inode(r, addr)?.meta
       };
       branches.push(branch);
     }
@@ -1155,7 +1155,7 @@ fn back_to_safety(cursor: &mut dyn Cursor, distance: u32, if_err: &'static str) 
   let from = cursor.stream_position()?;
   let to = from - distance as u64;
   if to < STORAGE_IDENTIFIER.len() as u64 + 1 {
-    Err(DamagedStorage(format!("{} (cannot move position from {} to {})", if_err, from, to)))
+    Err(DamagedStorage(format!("{if_err} (cannot move position from {from} to {to})")))
   } else {
     Ok(cursor.seek(io::SeekFrom::Current(-(distance as i64)))?)
   }
@@ -1175,5 +1175,5 @@ fn inconsistency<T>(msg: String) -> Result<T> {
 
 #[inline]
 fn hex(value: &[u8]) -> String {
-  value.iter().map(|c| format!("{:02X}", c)).collect()
+  value.iter().map(|c| format!("{c:02X}")).collect()
 }

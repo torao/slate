@@ -9,15 +9,15 @@ use leveldb::database::Database;
 use leveldb::kv::KV;
 use leveldb::options::{Options, ReadOptions, WriteOptions};
 
-use bht::model::NthGenHashTree;
-use bht::{Hash, Index, MemStorage, BHT, HASH_SIZE};
+use slate::model::NthGenHashTree;
+use slate::{Hash, Index, MemStorage, Slate, HASH_SIZE};
 
 fn bench_append(c: &mut Criterion) {
   let file = temp_file("bench", ".db");
-  let _db = BHT::new(file.clone()).unwrap();
-  let mut db = BHT::new(MemStorage::new()).unwrap();
+  let _db = Slate::new(file.clone()).unwrap();
+  let mut db = Slate::new(MemStorage::new()).unwrap();
   let data = &[0u8; 1024];
-  c.bench_function("BHT append", |b| b.iter(|| db.append(data).unwrap()));
+  c.bench_function("Slate append", |b| b.iter(|| db.append(data).unwrap()));
   remove_file(&file).unwrap();
 }
 
@@ -26,35 +26,35 @@ fn bench_level_db(c: &mut Criterion) {
   {
     let mut opts = Options::new();
     opts.create_if_missing = true;
-    let db = Database::open(dir.as_path(), opts).unwrap();
+    let db: Database<KEY> = Database::open(dir.as_path(), opts).unwrap();
     let data = &[0u8; 1024];
     let write_option = WriteOptions::new();
     let mut i: Index = 1;
     c.bench_function("leveldb append", |b| {
       b.iter(|| {
         // 値の保存
-        let key = KEY(format!("val{}", i));
-        db.put(write_option, key, data).unwrap();
+        let key = format!("val{}", i);
+        db.put(write_option, KEY(key), data).unwrap();
 
         // ハッシュ値の保存
-        let key = KEY(format!("hash{}_0", i));
-        let hash = Hash::hash(data);
-        db.put(write_option, key, &hash.value).unwrap();
+        let key = format!("hash{}_0", i);
+        let hash = Hash::from_bytes(data);
+        db.put(write_option, KEY(key), &hash.value).unwrap();
 
         // 中間ノードのハッシュ値の保存
         let gen = NthGenHashTree::new(i as u64);
         let mut right_hash = hash;
         for inode in gen.inodes().iter() {
-          let key = KEY(format!("hash{}_{}", inode.left.i, inode.left.j));
+          let key = format!("hash{}_{}", inode.left.i, inode.left.j);
           let read_option = ReadOptions::new();
-          let left_hash = db.get_bytes(read_option, &key).unwrap().unwrap();
+          let left_hash = db.get_bytes(read_option, &KEY(key)).unwrap().unwrap();
           let mut left_hash_bytes = [0u8; HASH_SIZE];
           (&mut left_hash_bytes[..]).write_all(left_hash.as_ref()).unwrap();
           let left_hash = Hash::new(left_hash_bytes);
 
-          let key = KEY(format!("hash{}_{}", i, inode.node.j));
+          let key = format!("hash{}_{}", i, inode.node.j);
           let hash = left_hash.combine(&right_hash);
-          db.put(write_option, key, &hash.value).unwrap();
+          db.put(write_option, KEY(key), &hash.value).unwrap();
           right_hash = hash;
         }
 

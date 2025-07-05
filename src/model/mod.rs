@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 #[cfg(test)]
 mod test;
 
-/// BHT がインデックス i として使用する整数の型です。`u64` を表しています。
+/// Slate がインデックス i として使用する整数の型です。`u64` を表しています。
 ///
 /// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
 /// ことができます。
@@ -25,7 +25,7 @@ pub const INDEX_SIZE: u8 = 64;
 #[cfg(feature = "small_index")]
 pub const INDEX_SIZE: u8 = 32;
 
-/// BHT のアルゴリズムで使用する任意のノード b_{i,j} を表すための構造体です。
+/// Slate のアルゴリズムで使用する任意のノード b_{i,j} を表すための構造体です。
 ///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct Node {
@@ -39,7 +39,7 @@ impl Node {
   }
 }
 
-/// BHT のアルゴリズムで使用する任意の中間ノードを表すための構造体です。左右の枝への分岐を含みます。
+/// Slate のアルゴリズムで使用する任意の中間ノードを表すための構造体です。左右の枝への分岐を含みます。
 ///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct INode {
@@ -206,14 +206,14 @@ impl NthGenHashTree {
     } else if is_pbst(i, j) && i < self.n() {
       Some(Self::pbst_inode(i, j))
     } else {
-      self.ephemeral_nodes().find(|node| node.node.i == i && node.node.j == j).map(|i| *i)
+      self.ephemeral_nodes().find(|node| node.node.i == i && node.node.j == j).copied()
     }
   }
 
   #[inline]
   fn pbst_inode(i: Index, j: u8) -> INode {
     debug_assert!(is_pbst(i, j), "({}, {}) is not a PBST", i, j);
-    debug_assert_ne!(0, j, "({}, {}) is a leaf node, not a inode", i, j);
+    debug_assert_ne!(0, j, "({i}, {j}) is a leaf node, not a inode");
     INode::new(Node::new(i, j), Node::new(i - (1 << (j - 1)), j - 1), Node::new(i, j - 1))
   }
 
@@ -232,7 +232,7 @@ impl NthGenHashTree {
   }
 
   /// 一過性の中間ノードを参照します。
-  fn create_ephemeral_nodes(n: Index, pbsts: &Vec<Node>) -> Vec<INode> {
+  fn create_ephemeral_nodes(n: Index, pbsts: &[Node]) -> Vec<INode> {
     debug_assert_ne!(0, pbsts.len());
     let mut ephemerals = Vec::<INode>::with_capacity(pbsts.len() - 1);
     for i in 0..pbsts.len() - 1 {
