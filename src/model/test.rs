@@ -11,11 +11,13 @@ fn test_generation_new_with_zero() {
 
 #[test]
 fn test_generation() {
+  struct X(u64, Vec<u8>, Vec<u8>, Vec<(u64, u8)>);
+
   // 高さ j の完全二分木のケース
-  let pbt = |j: u8| (1 << j, (1..=j).rev().collect::<Vec<u8>>(), vec![], vec![(1 << j, j)]);
+  let pbt = |j: u8| X(1 << j, (1..=j).rev().collect::<Vec<u8>>(), vec![], vec![(1 << j, j)]);
 
   // 高さ j の完全二分木となる手前のケース
-  let pre_pbt = |j: u8| -> (u64, Vec<u8>, Vec<u8>, Vec<(u64, u8)>) {
+  let pre_pbt = |j: u8| -> X {
     let mut ephemerals = (1..=j).rev().collect::<Vec<u8>>();
     ephemerals.remove(ephemerals.len() - 1);
     let pbsts = (0..j)
@@ -26,31 +28,29 @@ fn test_generation() {
       })
       .collect();
     let i = if j == 64 { 0xFFFFFFFFFFFFFFFFu64 } else { (1u64 << j) - 1 };
-    (i, ephemerals.clone(), ephemerals, pbsts)
+    X(i, ephemerals.clone(), ephemerals, pbsts)
   };
 
   // 高さ j の完全二分木の次のケース
-  let post_pbt = |j: u8| -> (Index, Vec<u8>, Vec<u8>, Vec<(Index, u8)>) {
-    ((1 << j) + 1, vec![j + 1], vec![j + 1], vec![(1 << j, j), ((1 << j) + 1, 0)])
-  };
+  let post_pbt = |j: u8| -> X { X((1 << j) + 1, vec![j + 1], vec![j + 1], vec![(1 << j, j), ((1 << j) + 1, 0)]) };
 
-  for (n, inode_js, ephemeral_js, pbst_roots) in vec![
-    (1, vec![], vec![], vec![(1u64, 0u8)]),
-    (2, vec![1u8], vec![], vec![(2, 1)]),
-    (3, vec![2], vec![2u8], vec![(2, 1), (3, 0)]),
-    (4, vec![2, 1], vec![], vec![(4, 2)]),
-    (5, vec![3], vec![3], vec![(4, 2), (5, 0)]),
-    (6, vec![3, 1], vec![3], vec![(4, 2), (6, 1)]),
-    (7, vec![3, 2], vec![3, 2], vec![(4, 2), (6, 1), (7, 0)]),
-    (8, vec![3, 2, 1], vec![], vec![(8, 3)]),
-    (9, vec![4], vec![4], vec![(8, 3), (9, 0)]),
-    (10, vec![4, 1], vec![4], vec![(8, 3), (10, 1)]),
-    (11, vec![4, 2], vec![4, 2], vec![(8, 3), (10, 1), (11, 0)]),
-    (12, vec![4, 2, 1], vec![4], vec![(8, 3), (12, 2)]),
-    (13, vec![4, 3], vec![4, 3], vec![(8, 3), (12, 2), (13, 0)]),
-    (14, vec![4, 3, 1], vec![4, 3], vec![(8, 3), (12, 2), (14, 1)]),
-    (15, vec![4, 3, 2], vec![4, 3, 2], vec![(8, 3), (12, 2), (14, 1), (15, 0)]),
-    (16, vec![4, 3, 2, 1], vec![], vec![(16, 4)]),
+  for X(n, inode_js, ephemeral_js, pbst_roots) in vec![
+    X(1, vec![], vec![], vec![(1u64, 0u8)]),
+    X(2, vec![1u8], vec![], vec![(2, 1)]),
+    X(3, vec![2], vec![2u8], vec![(2, 1), (3, 0)]),
+    X(4, vec![2, 1], vec![], vec![(4, 2)]),
+    X(5, vec![3], vec![3], vec![(4, 2), (5, 0)]),
+    X(6, vec![3, 1], vec![3], vec![(4, 2), (6, 1)]),
+    X(7, vec![3, 2], vec![3, 2], vec![(4, 2), (6, 1), (7, 0)]),
+    X(8, vec![3, 2, 1], vec![], vec![(8, 3)]),
+    X(9, vec![4], vec![4], vec![(8, 3), (9, 0)]),
+    X(10, vec![4, 1], vec![4], vec![(8, 3), (10, 1)]),
+    X(11, vec![4, 2], vec![4, 2], vec![(8, 3), (10, 1), (11, 0)]),
+    X(12, vec![4, 2, 1], vec![4], vec![(8, 3), (12, 2)]),
+    X(13, vec![4, 3], vec![4, 3], vec![(8, 3), (12, 2), (13, 0)]),
+    X(14, vec![4, 3, 1], vec![4, 3], vec![(8, 3), (12, 2), (14, 1)]),
+    X(15, vec![4, 3, 2], vec![4, 3, 2], vec![(8, 3), (12, 2), (14, 1), (15, 0)]),
+    X(16, vec![4, 3, 2, 1], vec![], vec![(16, 4)]),
     pre_pbt(16),
     pbt(16),
     post_pbt(16),
@@ -75,7 +75,7 @@ fn test_generation() {
 
     // 完全二分木のルートノード
     let expected = pbst_roots.iter().map(|(i, j)| Node::new(*i, *j)).collect::<Vec<Node>>();
-    let actual = generation.pbst_roots().map(|i| *i).collect::<Vec<Node>>();
+    let actual = generation.pbst_roots().copied().collect::<Vec<Node>>();
     assert_eq!(expected, actual);
 
     // n-th 世代の中間ノード
@@ -121,7 +121,7 @@ fn test_generation_path_to() {
   }
 
   // 範囲外の中間ノードを指定した場合
-  for (n, j) in vec![(1, 1), (1, 2), (2, 2), (3, 3), (4, 3)] {
+  for (n, j) in [(1, 1), (1, 2), (2, 2), (3, 3), (4, 3)] {
     let generation = NthGenHashTree::new(n);
     assert_eq!(None, generation.path_to(n, j));
   }
@@ -165,8 +165,7 @@ fn test_floor_and_ceil_log2() {
     rank + (if n == (1 << rank) { 0 } else { 1 })
   }
 
-  for x in vec![1u64, 2, 3, 4, 5, 7, 8, 9, 0xFFFFFFFF, 0x100000000, 0x100000001, 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF]
-  {
+  for x in [1u64, 2, 3, 4, 5, 7, 8, 9, 0xFFFFFFFF, 0x100000000, 0x100000001, 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF] {
     println!("floor(log₂ {}) = {}, ceil(log₂ {}) = {}", x, floor_log2(x), x, ceil_log2(x));
     assert_eq!(expected_floor(x), floor_log2(x));
     assert_eq!(expected_ceil(x), ceil_log2(x));
@@ -186,7 +185,7 @@ fn test_ceil_log2_with_zero() {
 }
 
 fn ns() -> impl Iterator<Item = u64> {
-  (1u64..1024).chain((10..63).map(|i| vec![(1 << i) - 1, 1 << i, (1 << i) + 1]).flatten()).chain(vec![
+  (1u64..1024).chain((10..63).flat_map(|i| vec![(1 << i) - 1, 1 << i, (1 << i) + 1])).chain(vec![
     u64::MAX - 2,
     u64::MAX - 1,
     u64::MAX,

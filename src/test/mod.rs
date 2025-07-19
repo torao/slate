@@ -31,7 +31,7 @@ fn test_multi_threaded_query() {
             assert!(i > 0 || i <= n);
             assert_eq!(random_payload(PAYLOAD_SIZE, i), value);
           } else {
-            assert!(i == 0 || i > n, "None for i={}, n={}", i, n);
+            assert!(i == 0 || i > n, "None for i={i}, n={n}");
           }
         }
       }));
@@ -101,7 +101,7 @@ fn garbled_at_any_position() -> Result<()> {
       // TODO 最終的に、どのフィールドのバイト値が破損したかを識別して想定したエラーが検知されていることを確認する
       cursor.seek(SeekFrom::Start(0))?;
       let result = read_entry(&mut cursor, 0);
-      assert!(result.is_err(), "{:?}", result);
+      assert!(result.is_err(), "{result:?}");
 
       // 破損したデータをもとに戻す
       cursor.seek(SeekFrom::Start(position))?;
@@ -278,20 +278,17 @@ fn inode(i: u64, j: u8, position: u64) -> INode {
 
 fn random_payload(length: usize, s: u64) -> Vec<u8> {
   let mut seed = [0u32; 2];
-  seed[0] = ((s >> 0) & 0xFFFFFFFF) as u32;
+  seed[0] = (s & 0xFFFFFFFF) as u32;
   seed[1] = ((s >> 8) & 0xFFFFFFFF) as u32;
   let mut rand = MT19937::new_with_slice_seed(&seed);
-  let mut bytes = Vec::<u8>::with_capacity(length);
-  unsafe {
-    bytes.set_len(length);
-  }
+  let mut bytes = vec![0u8; length];
   rand.fill_bytes(&mut bytes);
   bytes
 }
 
 fn random_hash(s: u64) -> Hash {
   let mut seed = [0u32; 2];
-  seed[0] = ((s >> 0) & 0xFFFFFFFF) as u32;
+  seed[0] = (s & 0xFFFFFFFF) as u32;
   seed[1] = ((s >> 8) & 0xFFFFFFFF) as u32;
   let mut rand = MT19937::new_with_slice_seed(&seed);
   let mut hash = [0u8; HASH_SIZE];
@@ -303,8 +300,8 @@ fn random_hash(s: u64) -> Hash {
 #[test]
 fn test_file_storage() {
   let file = temp_file("slate-storage", ".db");
-  verify_storage_spec(&file).expect(&format!("Slate compliance test filed: {}", file.to_string_lossy()));
-  remove_file(file.to_path_buf()).expect(&format!("failed to remove temporary file: {}", file.to_string_lossy()));
+  verify_storage_spec(&file).unwrap_or_else(|_| panic!("Slate compliance test filed: {}", file.to_string_lossy()));
+  remove_file(&file).unwrap_or_else(|_| panic!("failed to remove temporary file: {}", file.to_string_lossy()));
 }
 
 /// メモリーストレージの適合テスト
@@ -326,7 +323,7 @@ pub fn verify_storage_spec(storage: &dyn Storage) -> Result<()> {
   // 書き込みの実行
   let values = (0u8..=255).collect::<Vec<u8>>();
   for i in values.iter() {
-    writer.write_u8(*i).expect(&format!("fail to write at {}", *i));
+    writer.write_u8(*i).unwrap_or_else(|_| panic!("fail to write at {}", *i));
   }
 
   // 書き込み後に 2 つめの読み込み専用カーソルをオープン
@@ -334,7 +331,7 @@ pub fn verify_storage_spec(storage: &dyn Storage) -> Result<()> {
 
   // 読み込みの実行
   for i in values.iter() {
-    let value = reader1.read_u8().expect(&format!("failed to read at {}", *i));
+    let value = reader1.read_u8().unwrap_or_else(|_| panic!("failed to read at {}", *i));
     assert_eq!(*i, value);
   }
 
@@ -343,12 +340,12 @@ pub fn verify_storage_spec(storage: &dyn Storage) -> Result<()> {
   let mut rand = mt19937::MT19937::new_with_slice_seed(&[0u32]);
   for _ in 0..100 {
     let i = (rand.next_u32() & 0xFF) as u8;
-    reader1.seek(SeekFrom::Start(i as u64)).expect(&format!("failed to seek to {}", i));
-    let value = reader1.read_u8().expect(&format!("failed to read from cursor #1 at {}", i));
+    reader1.seek(SeekFrom::Start(i as u64)).unwrap_or_else(|_| panic!("failed to seek to {i}"));
+    let value = reader1.read_u8().unwrap_or_else(|_| panic!("failed to read from cursor #1 at {i}"));
     assert_eq!(i, value);
     let i = (rand.next_u32() & 0xFF) as u8;
-    reader2.seek(SeekFrom::Start(i as u64)).expect(&format!("failed to seek to {}", i));
-    let value = reader2.read_u8().expect(&format!("failed to read from cursor #2 at {}", i));
+    reader2.seek(SeekFrom::Start(i as u64)).unwrap_or_else(|_| panic!("failed to seek to {i}"));
+    let value = reader2.read_u8().unwrap_or_else(|_| panic!("failed to read from cursor #2 at {i}"));
     assert_eq!(i, value);
   }
   Ok(())
@@ -359,10 +356,10 @@ pub fn verify_storage_spec(storage: &dyn Storage) -> Result<()> {
 pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
   let dir = temp_dir();
   for i in 0u16..=u16::MAX {
-    let file_name = format!("{}{}{}", prefix, i, suffix);
+    let file_name = format!("{prefix}{i}{suffix}");
     let mut file = dir.to_path_buf();
     file.push(file_name);
-    match OpenOptions::new().write(true).create_new(true).open(file.to_path_buf()) {
+    match OpenOptions::new().write(true).create_new(true).open(&file) {
       Ok(_) => return file,
       Err(err) if err.kind() == ErrorKind::AlreadyExists => (),
       Err(err) => panic!("{}", err),
