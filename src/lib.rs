@@ -80,15 +80,44 @@ pub trait Storage: Write {
 
 /// ローカルファイルシステムのパスをストレージとして使用する実装です。
 pub struct FileStorage {
+  /// 読み出し時にオープンするためのこのファイルのパス。
   path: PathBuf,
+  /// 読み出しようにオープンするためのオプション。
+  read_options: OpenOptions,
+  /// 書き込み専用で、必ずファイルの末尾を指している。
   file: File,
+  /// このファイルの長さ
+  length: u64,
 }
 
 impl FileStorage {
   pub fn new<P: AsRef<Path>>(path: P) -> Result<FileStorage> {
+    Self::with_options(
+      path,
+      File::options().read(true).append(true).create(true).truncate(false).clone(),
+      File::options().read(true).write(false).create(false).truncate(false).clone(),
+    )
+  }
+
+  pub fn with_read_only<P: AsRef<Path>>(path: P) -> Result<FileStorage> {
+    Self::with_options(
+      path,
+      File::options().read(true).write(false).create(false).truncate(false).clone(),
+      File::options().read(true).write(false).create(false).truncate(false).clone(),
+    )
+  }
+
+  pub fn with_options<P: AsRef<Path>>(
+    path: P,
+    write_options: OpenOptions,
+    read_options: OpenOptions,
+  ) -> Result<FileStorage> {
     let path = path.as_ref().to_path_buf();
-    match File::options().read(true).write(true).create(true).truncate(false).open(&path) {
-      Ok(file) => Ok(Self { path, file }),
+    match write_options.open(&path) {
+      Ok(file) => {
+        let length = file.metadata()?.len();
+        Ok(Self { path, read_options, file, length })
+      }
       Err(err) => Err(Error::FailedToOpenLocalFile {
         file: path.to_str().map(|s| s.to_string()).unwrap_or(path.to_string_lossy().to_string()),
         message: err.to_string(),
@@ -99,23 +128,24 @@ impl FileStorage {
 
 impl Write for FileStorage {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-    self.file.write(buf)
+    let len = self.file.write(buf)?;
+    self.length += len as u64;
+    Ok(len)
   }
 
   fn flush(&mut self) -> io::Result<()> {
-    self.file.flush()?;
-    self.file.sync_all()
+    self.file.flush()
   }
 }
 
 impl Storage for FileStorage {
   fn cursor(&self) -> Result<Box<dyn Cursor>> {
-    let cursor = File::options().read(true).write(false).create(false).truncate(false).open(&self.path)?;
+    let cursor = self.read_options.open(&self.path)?;
     Ok(Box::new(cursor))
   }
 
   fn size(&self) -> Result<u64> {
-    Ok(self.file.metadata()?.len())
+    Ok(self.length)
   }
 }
 
