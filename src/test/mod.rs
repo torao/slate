@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::env::temp_dir;
 use std::hash::BuildHasher;
 use std::hash::Hasher;
@@ -29,7 +28,7 @@ fn test_multi_threaded_query() {
         for i in 0..=N {
           if let Some(value) = query.get(i).unwrap() {
             assert!(i > 0 || i <= n);
-            assert_eq!(random_payload(PAYLOAD_SIZE, i), value);
+            assert_eq!(&random_payload(PAYLOAD_SIZE, i), value.as_ref());
           } else {
             assert!(i == 0 || i > n, "None for i={i}, n={n}");
           }
@@ -48,19 +47,19 @@ fn test_multi_threaded_query() {
 /// 単一のエントリの直列化と復元をテストします。
 #[test]
 fn entry_serialization() -> Result<()> {
-  for entry in representative_entries(0) {
+  for entry in sample_entries() {
     // メモリ上に書き込みを行いサイズを確認
-    let mut cursor = io::Cursor::new(Vec::<u8>::new());
-    let write_length = write_entry(&mut cursor, &entry)?;
-    let storage_length = cursor.seek(SeekFrom::End(0))?;
-    assert_eq!(write_length as u64, storage_length);
+    let mut buffer = Vec::new();
+    let write_length = write_entry(&mut buffer, &entry)?;
+    assert_eq!(write_length, buffer.len());
 
     // チェックサムが実際に書き込まれたバイナリに対するものであることを確認
-    verify_checksum(cursor.get_ref());
+    verify_checksum(&buffer);
 
     let expected = entry;
 
     // 中間ノードのみを読み出して同一かを確認
+    let mut cursor = io::Cursor::new(buffer.clone());
     cursor.set_position(0);
     let inodes = read_inodes(&mut cursor, 0)?;
     assert_eq!(expected.inodes, inodes);
@@ -82,15 +81,16 @@ fn entry_serialization() -> Result<()> {
 /// 検証します。
 #[test]
 fn garbled_at_any_position() -> Result<()> {
-  for entry in representative_entries(0) {
-    let mut cursor = io::Cursor::new(Vec::<u8>::new());
-    let write_length = write_entry(&mut cursor, &entry)?;
-    let storage_length = cursor.seek(SeekFrom::End(0))?;
-    assert_eq!(write_length as u64, storage_length);
-    cursor.seek(SeekFrom::Start(0))?;
+  for entry in sample_entries() {
+    // 正しく書き込まれたバイナリを取得
+    let mut buffer = Vec::new();
+    let write_length = write_entry(&mut buffer, &entry)?;
+    assert_eq!(write_length, buffer.len());
+
+    let mut cursor = io::Cursor::new(buffer.clone());
     assert_eq!(entry, read_entry(&mut cursor, 0)?);
 
-    for position in 0..storage_length {
+    for position in 0u64..buffer.len() as u64 {
       // データ破損の設定
       cursor.seek(SeekFrom::Start(position))?;
       let correct = cursor.read_u8()?;
@@ -113,8 +113,8 @@ fn garbled_at_any_position() -> Result<()> {
 
 #[test]
 fn test_bootstrap() {
-  // 空のストレージを指定してファイル識別子が出力されることを確認
-  let buffer = Arc::new(RwLock::new(Vec::<u8>::with_capacity(4 * 1024)));
+  // 未初期化の空のストレージを指定してファイル識別子が書き込まれることを確認
+  let buffer = Arc::new(RwLock::new(Vec::new()));
   let storage = MemStorage::with(buffer.clone());
   let db = Slate::new(storage).unwrap();
   let content = buffer.read().unwrap();
@@ -128,17 +128,40 @@ fn test_bootstrap() {
   assert_eq!(&STORAGE_IDENTIFIER[..], &content[..3]);
   assert_eq!(STORAGE_VERSION, content[3]);
 
-  // ストレージの末尾に存在するエントリをルートとして読み込んでいることを確認
-  for entry in representative_entries(4) {
-    let mut buffer = Vec::<u8>::with_capacity(4 * 1024);
-    buffer.write_all(&STORAGE_IDENTIFIER).unwrap();
-    buffer.write_u8(STORAGE_VERSION).unwrap();
-    write_entry(&mut buffer, &entry).unwrap();
-    let buffer = Arc::new(RwLock::new(buffer));
-    let storage = MemStorage::with(buffer.clone());
+  // 0..n 個のエントリの直列化表現を作成
+  let n = 100;
+  let samples = (0..=n as u64)
+    .map(|i| (0u64..i).map(|j| splitmix64(i * i + j)).collect::<Vec<_>>())
+    .map(|values| values.iter().map(|i| i.to_le_bytes().to_vec()).collect::<Vec<_>>())
+    .map(|values| {
+      // 疑似ランダムな列の直列化形式を取得
+      let buffer = Arc::new(RwLock::new(Vec::new()));
+      let storage = MemStorage::with(buffer.clone());
+      let mut db = Slate::new(storage).unwrap();
+      for value in &values {
+        db.append(value).unwrap();
+      }
+      let buffer = buffer.clone().read().unwrap().clone();
+      (values, buffer)
+    })
+    .collect::<Vec<_>>();
+
+  // 0..n 個のエントリの直列化が保存されているストレージからデータ列を復元できることを確認
+  for (values, buffer) in samples {
+    let storage = MemStorage::with(Arc::new(RwLock::new(buffer)));
     let db = Slate::new(storage).unwrap();
-    let last = entry.inodes.last().map(|i| i.meta).unwrap_or(entry.enode.meta);
-    assert_eq!(Some(Node::new(last.address.i, last.address.j, last.hash)), db.root());
+    let mut query = db.query().unwrap();
+    for (i, expected) in values.iter().enumerate() {
+      let actual = query.get(i as u64 + 1).unwrap().unwrap();
+      assert_eq!(expected, actual.as_ref());
+    }
+    match db.root() {
+      Some(root) => {
+        assert_eq!(values.len() as Index, root.i);
+        assert_eq!(ceil_log2(values.len() as Index), root.j);
+      }
+      None => assert!(values.is_empty()),
+    }
   }
 }
 
@@ -157,7 +180,7 @@ fn test_append_and_get() {
       let expected = random_payload(PAYLOAD_SIZE, i + 1);
       let value = query.get(i + 1).unwrap();
       assert!(value.is_some());
-      assert_eq!(expected, value.unwrap());
+      assert_eq!(&expected, value.unwrap().as_ref());
     }
 
     // 範囲外のノードを参照
@@ -256,24 +279,36 @@ fn checksum(bytes: &[u8]) -> u64 {
 // TODO ストレージ末尾の 4 バイトの指す位置がたまたま最後より前の要素だった場合に、その要素を最後の要素とみなして
 // 後続が上書きされないように検証すること。
 
-/// テストに使用する代表的なノードの一覧を参照。
-fn representative_entries(position: u64) -> Vec<Entry> {
+/// 単体のエントリの書き込みと読み込みに使用する代表的なエントリを参照。
+fn sample_entries() -> Vec<Entry> {
   vec![
-    Entry { enode: enode(1, position, random_payload(5, 302875)), inodes: vec![] },
-    Entry { enode: enode(2, position, random_payload(826, 48727)), inodes: vec![inode(2, 1, position)] },
+    create_sample_entry(1, Vec::new()),
+    create_sample_entry(1, random_payload(5, 302875)),
+    create_sample_entry(2, random_payload(826, 48727)),
+    create_sample_entry(3, random_payload(826, 48727)),
   ]
 }
 
-fn enode(i: u64, position: u64, payload: Vec<u8>) -> ENode {
-  ENode { meta: MetaInfo { address: Address { i, j: 0, position }, hash: random_hash(position ^ i) }, payload }
-}
-
-fn inode(i: u64, j: u8, position: u64) -> INode {
-  INode {
-    meta: MetaInfo { address: Address { i, j, position }, hash: random_hash(position ^ j as u64) },
-    left: Address { i: i - 1, j: 0, position: max(position as i64 - 100, 0) as u64 },
-    right: Address { i, j: j - 1, position },
-  }
+fn create_sample_entry(i: Index, payload: Vec<u8>) -> Entry {
+  let position = 0;
+  let model = NthGenHashTree::new(i);
+  let enode = ENode {
+    meta: MetaInfo { address: Address { i, j: 0, position }, hash: random_hash(position ^ i) },
+    payload: Arc::new(payload),
+  };
+  let inodes = model
+    .inodes()
+    .iter()
+    .map(|inode| INode {
+      meta: MetaInfo {
+        address: Address { i: inode.node.i, j: inode.node.j, position },
+        hash: random_hash(position ^ inode.node.j as u64),
+      },
+      left: Address { i: inode.left.i, j: inode.left.j, position },
+      right: Address { i: inode.right.i, j: inode.right.j, position },
+    })
+    .collect();
+  Entry { enode, inodes }
 }
 
 fn random_payload(length: usize, s: u64) -> Vec<u8> {
@@ -300,38 +335,38 @@ fn random_hash(s: u64) -> Hash {
 #[test]
 fn test_file_storage() {
   let file = temp_file("slate-storage", ".db");
-  verify_storage_spec(&file).unwrap_or_else(|_| panic!("Slate compliance test filed: {}", file.to_string_lossy()));
+  let mut db = FileStorage::new(&file).unwrap();
+  verify_storage_spec(&mut db).unwrap_or_else(|_| panic!("Slate compliance test filed: {}", file.to_string_lossy()));
   remove_file(&file).unwrap_or_else(|_| panic!("failed to remove temporary file: {}", file.to_string_lossy()));
 }
 
 /// メモリーストレージの適合テスト
 #[test]
 fn test_memory_storage() {
-  verify_storage_spec(&MemStorage::new()).expect("Slate compliance test filed");
+  verify_storage_spec(&mut MemStorage::new()).expect("Slate compliance test filed");
 }
 
 /// 指定されたストレージが仕様に準拠していることを検証します。
-pub fn verify_storage_spec(storage: &dyn Storage) -> Result<()> {
-  // 読み込み専用または書き込み用に (同時に) オープンできることを確認
-  let mut writer = storage.open(true).expect("failed to open cursor as writable");
-  let mut reader1 = storage.open(false).expect("failed to open cursor as read-only #1");
-
-  // まだ書き込んでいない状態で末尾までシーク
+pub fn verify_storage_spec(storage: &mut dyn Storage) -> Result<()> {
+  // まだ書き込んでいない状態での末尾は 0
+  let mut reader1 = storage.cursor().expect("failed to open cursor as read-only #1");
   let zero_position = reader1.seek(SeekFrom::End(0)).expect("failed to seek on zero-length storage");
   assert_eq!(0, zero_position);
 
   // 書き込みの実行
   let values = (0u8..=255).collect::<Vec<u8>>();
-  for i in values.iter() {
-    writer.write_u8(*i).unwrap_or_else(|_| panic!("fail to write at {}", *i));
-  }
+  storage.write_all(&values).unwrap_or_else(|_| panic!("fail to write"));
+  storage.flush().unwrap();
+
+  // 既存のカーソルは書き込みの影響を受けない
+  assert_eq!(zero_position, reader1.stream_position()?);
 
   // 書き込み後に 2 つめの読み込み専用カーソルをオープン
-  let mut reader2 = storage.open(false).expect("failed to open cursor as read-only #2");
+  let mut reader2 = storage.cursor().expect("failed to open cursor as read-only #2");
 
   // 読み込みの実行
   for i in values.iter() {
-    let value = reader1.read_u8().unwrap_or_else(|_| panic!("failed to read at {}", *i));
+    let value = reader1.read_u8().unwrap_or_else(|e| panic!("failed to read at {}, {}", *i, e));
     assert_eq!(*i, value);
   }
 
@@ -366,4 +401,11 @@ pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
     }
   }
   panic!("cannot create new temporary file: {}{}{}nnn{}", dir.to_string_lossy(), MAIN_SEPARATOR, prefix, suffix);
+}
+
+fn splitmix64(x: u64) -> u64 {
+  let mut z = x;
+  z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+  z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+  z ^ (z >> 31)
 }

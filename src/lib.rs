@@ -21,7 +21,7 @@
 //! let root = db.append(first).unwrap();
 //! let mut query = db.query().unwrap();
 //! assert_eq!(1, root.i);
-//! assert_eq!(first, query.get(root.i).unwrap().unwrap());
+//! assert_eq!(first, query.get(root.i).unwrap().unwrap().as_ref());
 //!
 //! // Similar to the typical hash tree, you can refer to a verifiable value using root hash.
 //! let second = "second".as_bytes();
@@ -45,19 +45,18 @@
 //!
 use std::cmp::min;
 use std::fmt::{Debug, Display, Formatter};
-use std::fs::*;
-use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LockResult, RwLock};
+use std::{fs::*, io};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use highway::{HighwayHasher, Key};
 
 use crate::checksum::{HashRead, HashWrite};
-use crate::error::Detail;
-use crate::error::Detail::*;
-use crate::model::{NthGenHashTree, range};
+use crate::error::Error;
+use crate::error::Error::*;
+use crate::model::{NthGenHashTree, ceil_log2, range};
 
 pub(crate) mod checksum;
 pub mod error;
@@ -67,27 +66,56 @@ pub mod model;
 #[cfg(test)]
 pub mod test;
 
-/// slate クレートで使用する標準 Result。[`error::Detail`] も参照。
-pub type Result<T> = std::result::Result<T, error::Detail>;
+/// slate クレートで使用する標準 Result。[`error::Error`] も参照。
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// ハッシュ木を保存する抽象化されたストレージです。read 用または read + write 用のカーソル参照を実装することで
 /// 任意のデバイスに直列化することができます。
-pub trait Storage {
-  /// このストレージに対する read または read + write 用のカーソルを作成します。
-  fn open(&self, writable: bool) -> Result<Box<dyn Cursor>>;
+pub trait Storage: Write {
+  /// このストレージに対する read 用のカーソルを作成します。
+  fn cursor(&self) -> Result<Box<dyn Cursor>>;
+  /// このストレージの大きさ (次に書き込まれるエントリの位置) を参照します。
+  fn size(&self) -> Result<u64>;
 }
 
 /// ローカルファイルシステムのパスをストレージとして使用する実装です。
-impl<P: AsRef<Path>> Storage for P {
-  fn open(&self, writable: bool) -> Result<Box<dyn Cursor>> {
-    let file = OpenOptions::new().read(true).write(writable).create(writable).open(self);
-    match file {
-      Ok(file) => Ok(Box::new(file)),
-      Err(err) => Err(Detail::FailedToOpenLocalFile {
-        file: self.as_ref().to_str().map(|s| s.to_string()).unwrap_or(self.as_ref().to_string_lossy().to_string()),
+pub struct FileStorage {
+  path: PathBuf,
+  file: File,
+}
+
+impl FileStorage {
+  pub fn new<P: AsRef<Path>>(path: P) -> Result<FileStorage> {
+    let path = path.as_ref().to_path_buf();
+    match File::options().read(true).write(true).create(true).truncate(false).open(&path) {
+      Ok(file) => Ok(Self { path, file }),
+      Err(err) => Err(Error::FailedToOpenLocalFile {
+        file: path.to_str().map(|s| s.to_string()).unwrap_or(path.to_string_lossy().to_string()),
         message: err.to_string(),
       }),
     }
+  }
+}
+
+impl Write for FileStorage {
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    self.file.write(buf)
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    self.file.flush()?;
+    self.file.sync_all()
+  }
+}
+
+impl Storage for FileStorage {
+  fn cursor(&self) -> Result<Box<dyn Cursor>> {
+    let cursor = File::options().read(true).write(false).create(false).truncate(false).open(&self.path)?;
+    Ok(Box::new(cursor))
+  }
+
+  fn size(&self) -> Result<u64> {
+    Ok(self.file.metadata()?.len())
   }
 }
 
@@ -116,25 +144,40 @@ impl Default for MemStorage {
   }
 }
 
+impl Write for MemStorage {
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    let mut buffer = lock2io(self.buffer.write())?;
+    buffer.write(buf)
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    Ok(())
+  }
+}
+
 impl Storage for MemStorage {
-  fn open(&self, writable: bool) -> Result<Box<dyn Cursor>> {
-    Ok(Box::new(MemCursor { writable, position: 0, buffer: self.buffer.clone() }))
+  fn cursor(&self) -> Result<Box<dyn Cursor>> {
+    Ok(Box::new(MemCursor { position: 0, buffer: self.buffer.clone() }))
+  }
+
+  fn size(&self) -> Result<u64> {
+    let buffer = lock2io(self.buffer.read())?;
+    Ok(buffer.len() as u64)
   }
 }
 
 struct MemCursor {
-  writable: bool,
   position: usize,
   buffer: Arc<RwLock<Vec<u8>>>,
 }
 
 impl Cursor for MemCursor {}
 
-impl io::Seek for MemCursor {
-  fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+impl Seek for MemCursor {
+  fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
     self.position = match pos {
-      io::SeekFrom::Start(position) => position as usize,
-      io::SeekFrom::End(position) => {
+      SeekFrom::Start(position) => position as usize,
+      SeekFrom::End(position) => {
         let mut buffer = lock2io(self.buffer.write())?;
         let new_position = (buffer.len() as i64 + position) as usize;
         while buffer.len() < new_position {
@@ -142,7 +185,7 @@ impl io::Seek for MemCursor {
         }
         new_position
       }
-      io::SeekFrom::Current(position) => (self.position as i64 + position) as usize,
+      SeekFrom::Current(position) => (self.position as i64 + position) as usize,
     };
     Ok(self.position as u64)
   }
@@ -158,30 +201,14 @@ impl io::Read for MemCursor {
   }
 }
 
-impl io::Write for MemCursor {
-  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-    if !self.writable {
-      return Err(io::Error::from(io::ErrorKind::PermissionDenied));
-    }
-    let mut buffer = lock2io(self.buffer.write())?;
-    let length = buffer.write(buf)?;
-    self.position += length;
-    Ok(length)
-  }
-
-  fn flush(&mut self) -> io::Result<()> {
-    Ok(())
-  }
-}
-
 /// `LockResult` を `io::Result` に変換します。
 #[inline]
 fn lock2io<T>(result: LockResult<T>) -> io::Result<T> {
   result.map_err(|err| io::Error::other(err.to_string()))
 }
 
-/// ストレージからデータの入出力を行うためのカーソルです。
-pub trait Cursor: io::Seek + io::Read + io::Write {}
+/// ストレージからデータの入力を行うためのカーソルです。
+pub trait Cursor: io::Seek + io::Read {}
 
 impl Cursor for File {}
 
@@ -320,24 +347,17 @@ impl ValuesWithBranches {
 
 /// [`Hash::hash()`] によって得られるハッシュ値のバイトサイズを表す定数です。デフォルトの `feature = "sha256"`
 /// ビルドでは 32 を表します。
-pub const HASH_SIZE: usize = {
-  #[cfg(feature = "highwayhash64")]
-  {
-    8
-  }
-  #[cfg(any(feature = "sha224", feature = "sha512_224"))]
-  {
-    28
-  }
-  #[cfg(any(feature = "sha256", feature = "sha512_256"))]
-  {
-    32
-  }
-  #[cfg(feature = "sha512")]
-  {
-    64
-  }
-};
+#[cfg(feature = "highwayhash64")]
+pub const HASH_SIZE: usize = 8;
+
+#[cfg(any(feature = "sha224", feature = "sha512_224"))]
+pub const HASH_SIZE: usize = 28;
+
+#[cfg(any(feature = "sha256", feature = "sha512_256"))]
+pub const HASH_SIZE: usize = 32;
+
+#[cfg(feature = "sha512")]
+pub const HASH_SIZE: usize = 64;
 
 /// ハッシュ木が使用するハッシュ値です。
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
@@ -442,10 +462,10 @@ impl INode {
 }
 
 /// 値を持つ葉ノードを表します。
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 struct ENode {
   pub meta: MetaInfo,
-  pub payload: Vec<u8>,
+  pub payload: Arc<Vec<u8>>,
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -453,6 +473,12 @@ enum RootRef<'a> {
   None,
   INode(&'a INode),
   ENode(&'a ENode),
+}
+
+#[derive(Eq, PartialEq, Debug)]
+enum PbstRoot {
+  INode(INode),
+  ENode(ENode),
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -489,6 +515,7 @@ fn is_version_compatible(version: u8) -> bool {
 #[derive(PartialEq, Eq, Debug)]
 struct CacheInner {
   last_entry: Entry,
+  pbst_roots: Vec<PbstRoot>,
   model: NthGenHashTree,
 }
 
@@ -496,19 +523,13 @@ struct CacheInner {
 struct Cache(Option<CacheInner>);
 
 impl Cache {
-  fn new(last_entry: Entry, model: NthGenHashTree) -> Self {
+  pub fn new(last_entry: Entry, pbst_roots: Vec<PbstRoot>, model: NthGenHashTree) -> Self {
     debug_assert_eq!(model.n(), last_entry.enode.meta.address.i);
-    Cache(Some(CacheInner { last_entry, model }))
+    Cache(Some(CacheInner { last_entry, pbst_roots, model }))
   }
-  fn from_entry(last_entry: Option<Entry>) -> Self {
-    let inner = if let Some(last_entry) = last_entry {
-      let n = last_entry.enode.meta.address.i;
-      let model = NthGenHashTree::new(n);
-      Some(CacheInner { last_entry, model })
-    } else {
-      None
-    };
-    Cache(inner)
+
+  pub fn empty() -> Self {
+    Cache(None)
   }
 
   fn last_entry(&self) -> Option<&Entry> {
@@ -532,6 +553,32 @@ impl Cache {
   fn n(&self) -> Index {
     self.last_entry().map(|e| e.enode.meta.address.i).unwrap_or(0)
   }
+
+  fn get_pbst_root(&self, i: Index, j: u8) -> PbstRoot {
+    if let Some(cache) = &self.0 {
+      for node in cache.pbst_roots.iter() {
+        match &node {
+          PbstRoot::ENode(enode) if enode.meta.address.i == i && enode.meta.address.j == j => {
+            return PbstRoot::ENode(enode.clone());
+          }
+          PbstRoot::INode(inode) if inode.meta.address.i == i && inode.meta.address.j == j => {
+            return PbstRoot::INode(*inode);
+          }
+          _ => (),
+        }
+      }
+      for node in cache.last_entry.inodes.iter() {
+        if node.meta.address.i == i && node.meta.address.j == j {
+          return PbstRoot::INode(*node);
+        }
+      }
+      if cache.last_entry.enode.meta.address.i == i && cache.last_entry.enode.meta.address.j == j {
+        return PbstRoot::ENode(cache.last_entry.enode.clone());
+      }
+    }
+    // キャッシュの内容が矛盾している
+    panic!("the specified node b_{{{i},{j}}} doesn't exist in the cache")
+  }
 }
 
 /// ストレージ上に直列化された Stratified Hash Tree を表す木構造に対する操作を実装します。
@@ -552,15 +599,16 @@ impl<S: Storage> Slate<S> {
   /// 以下はシステムのテンポラリディレクトリ上の `slate-example.db` にハッシュ木を直列化する例です。
   ///
   /// ```rust
-  /// use slate::{Slate,Storage,Result};
+  /// use slate::{FileStorage,Slate,Storage,Result};
   /// use std::env::temp_dir;
   /// use std::fs::remove_file;
   /// use std::path::PathBuf;
   ///
   /// fn append_and_get(file: &PathBuf) -> Result<()>{
-  ///   let mut db = Slate::new(file)?;
+  ///   let storage = FileStorage::new(file)?;
+  ///   let mut db = Slate::new(storage)?;
   ///   let root = db.append(&vec![0u8, 1, 2, 3])?;
-  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.query()?.get(root.i)?);
+  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.query()?.get(root.i)?.map(|x| x.as_ref().clone()));
   ///   Ok(())
   /// }
   ///
@@ -570,7 +618,7 @@ impl<S: Storage> Slate<S> {
   /// remove_file(path.as_path()).unwrap();
   /// ```
   pub fn new(storage: S) -> Result<Slate<S>> {
-    let gen_cache = Arc::new(Cache::from_entry(None));
+    let gen_cache = Arc::new(Cache::empty());
     let mut db = Slate { storage: Box::new(storage), latest_cache: gen_cache };
     db.init()?;
     Ok(db)
@@ -601,13 +649,14 @@ impl<S: Storage> Slate<S> {
   }
 
   fn init(&mut self) -> Result<()> {
-    let mut cursor = self.storage.open(true)?;
+    let mut cursor = self.storage.cursor()?;
     let length = cursor.seek(io::SeekFrom::End(0))?;
     match length {
       0 => {
         // マジックナンバーの書き込み
-        cursor.write_all(&STORAGE_IDENTIFIER)?;
-        cursor.write_u8(STORAGE_VERSION)?;
+        self.storage.write_all(&STORAGE_IDENTIFIER)?;
+        self.storage.write_u8(STORAGE_VERSION)?;
+        self.storage.flush()?;
       }
       1..=3 => return Err(FileIsNotContentsOfLMTHTree { message: "bad magic number" }),
       _ => {
@@ -624,8 +673,8 @@ impl<S: Storage> Slate<S> {
     }
 
     let length = cursor.seek(io::SeekFrom::End(0))?;
-    let tail = if length == 4 {
-      None
+    let new_cache = if length == 4 {
+      Cache::empty()
     } else {
       // 末尾のエントリを読み込み
       back_to_safety(cursor.as_mut(), 4 + 8, "The first entry is corrupted.")?;
@@ -638,11 +687,22 @@ impl<S: Storage> Slate<S> {
         let msg = "The last entry is corrupted.".to_string();
         return Err(DamagedStorage(msg));
       }
-      Some(entry)
+
+      // PBST ルートノードの読み込み
+      let mut pbst_roots = Vec::with_capacity(entry.inodes.len());
+      for inode in entry.inodes.iter() {
+        let position = inode.left.position;
+        let i_expected = inode.left.i;
+        cursor.seek(SeekFrom::Start(position))?;
+        let Entry { enode, mut inodes } = read_entry_without_check(&mut cursor, position, i_expected)?;
+        let pbst_root = inodes.pop().map(PbstRoot::INode).unwrap_or(PbstRoot::ENode(enode));
+        pbst_roots.push(pbst_root);
+      }
+      let model = NthGenHashTree::new(entry.enode.meta.address.i);
+      Cache::new(entry, pbst_roots, model)
     };
 
     // キャッシュを更新
-    let new_cache = Cache::from_entry(tail);
     self.latest_cache = Arc::new(new_cache);
 
     Ok(())
@@ -659,36 +719,41 @@ impl<S: Storage> Slate<S> {
       return Err(TooLargePayload { size: value.len() });
     }
 
-    let mut cursor = self.storage.open(true)?;
-
     // 葉ノードの構築
-    let position = cursor.seek(SeekFrom::End(0))?;
+    let position = self.storage.size()?;
     let i = self.latest_cache.root().map(|node| node.i + 1).unwrap_or(1);
     let hash = Hash::from_bytes(value);
-    let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), hash), payload: Vec::from(value) };
+    let meta = MetaInfo::new(Address::new(i, 0, position), hash);
+    let enode = ENode { meta, payload: Arc::new(Vec::from(value)) };
 
-    // 中間ノードの構築
+    // 中間ノードとその左枝にある PBST ルートの構築
     let mut inodes = Vec::<INode>::with_capacity(INDEX_SIZE as usize);
     let mut right_hash = enode.meta.hash;
     let generation = NthGenHashTree::new(i);
     let mut right_to_left_inodes = generation.inodes();
     right_to_left_inodes.reverse();
+    let mut pbst_roots = Vec::with_capacity(ceil_log2(i) as usize);
     for n in right_to_left_inodes.iter() {
       debug_assert_eq!(i, n.node.i);
       debug_assert_eq!(n.node.i, n.right.i);
       debug_assert!(n.node.j > n.right.j);
       debug_assert!(n.left.j >= n.right.j);
-      if let Some(left) = Query::get_node(&self.latest_cache, &mut cursor, n.left.i, n.left.j)? {
-        let right = Address::new(n.right.i, n.right.j, position);
-        let hash = left.hash.combine(&right_hash);
-        let node = MetaInfo::new(Address::new(n.node.i, n.node.j, position), hash);
-        let inode = INode::new(node, left.address, right);
-        inodes.push(inode);
-        right_hash = hash;
-      } else {
-        // 内部の木構造とストレージ上のデータが矛盾している
-        return inconsistency(format!("cannot find the node b_{{{},{}}}", n.left.i, n.left.j));
-      }
+
+      // 左枝のノード (PBST ルート) を保存
+      let left_node = self.latest_cache.get_pbst_root(n.left.i, n.left.j);
+      let left = match &left_node {
+        PbstRoot::ENode(enode) => enode.meta,
+        PbstRoot::INode(inode) => inode.meta,
+      };
+      pbst_roots.push(left_node);
+
+      // 右枝のノードを保存
+      let right = Address::new(n.right.i, n.right.j, position);
+      let hash = left.hash.combine(&right_hash);
+      let node = MetaInfo::new(Address::new(n.node.i, n.node.j, position), hash);
+      let inode = INode::new(node, left.address, right);
+      inodes.push(inode);
+      right_hash = hash;
     }
 
     // 返値のための高さとルートハッシュを取得
@@ -696,18 +761,18 @@ impl<S: Storage> Slate<S> {
       if let Some(inode) = inodes.last() { (inode.meta.address.j, inode.meta.hash) } else { (0u8, enode.meta.hash) };
 
     // エントリを書き込んで状態を更新
-    cursor.seek(SeekFrom::End(0))?;
     let entry = Entry { enode, inodes };
-    write_entry(&mut cursor, &entry)?;
+    write_entry(self.storage.as_mut(), &entry)?;
 
     // キャッシュを更新
-    self.latest_cache = Arc::new(Cache::new(entry, generation));
+    let cache = Cache(Some(CacheInner { last_entry: entry, pbst_roots, model: generation }));
+    self.latest_cache = Arc::new(cache);
 
     Ok(Node::new(i, j, root_hash))
   }
 
   pub fn query(&self) -> Result<Query> {
-    let cursor = self.storage.open(false)?;
+    let cursor = self.storage.cursor()?;
     let generation = self.latest_cache.clone();
     Ok(Query { cursor, generation })
   }
@@ -719,18 +784,18 @@ pub struct Query {
 }
 
 impl Query {
-  /// このクエリーが対象としている木構造の世代を参照します。
+  /// このクエリーが対象としている木構造の世代 (スナップショットに相当) を参照します。
   pub fn n(&self) -> Index {
     self.generation.n()
   }
 
   /// 範囲外のインデックス (0 を含む) を指定した場合は `None` を返します。
-  pub fn get(&mut self, i: Index) -> Result<Option<Vec<u8>>> {
+  pub fn get(&mut self, i: Index) -> Result<Option<Arc<Vec<u8>>>> {
     if let Some(node) = Self::get_node(self.generation.as_ref(), &mut self.cursor, i, 0)? {
       self.cursor.seek(io::SeekFrom::Start(node.address.position))?;
       let entry = read_entry_without_check(&mut self.cursor, node.address.position, node.address.i)?;
       let Entry { enode: ENode { payload, .. }, .. } = entry;
-      Ok(Some(payload))
+      Ok(Some(payload.clone()))
     } else {
       Ok(None)
     }
@@ -775,7 +840,7 @@ impl Query {
   /// ```
   ///
   pub fn get_values_with_hashes(&mut self, i: Index, j: u8) -> Result<Option<ValuesWithBranches>> {
-    let (last_entry, model) = if let Some(CacheInner { last_entry, model }) = &self.generation.0 {
+    let (last_entry, model) = if let Some(CacheInner { last_entry, pbst_roots: _, model }) = &self.generation.0 {
       if i == 0 || i > model.n() {
         return Ok(None);
       }
@@ -789,7 +854,10 @@ impl Query {
         self.cursor.seek(SeekFrom::Start(enode.meta.address.position))?;
         let Entry { enode: ENode { payload, .. }, .. } =
           read_entry_without_check(&mut self.cursor, enode.meta.address.position, i)?;
-        return Ok(Some(ValuesWithBranches { values: vec![Value { i, value: payload }], branches: vec![] }));
+        return Ok(Some(ValuesWithBranches {
+          values: vec![Value { i, value: payload.as_ref().clone() }],
+          branches: vec![],
+        }));
       }
       RootRef::None => return Ok(None),
     };
@@ -846,7 +914,7 @@ impl Query {
         self.cursor.seek(SeekFrom::Start(next.position))?;
         let Entry { enode: ENode { payload, .. }, .. } =
           read_entry_without_check(&mut self.cursor, next.position, next.i)?;
-        let values = vec![Value { i: next.i, value: payload }];
+        let values = vec![Value { i: next.i, value: payload.as_ref().clone() }];
         return Ok(Some(ValuesWithBranches::new(values, branches)));
       }
 
@@ -904,7 +972,7 @@ impl Query {
     while i <= i1 {
       let Entry { enode: ENode { meta: node, payload }, .. } = read_entry_without_check_to_end(&mut self.cursor, i)?;
       debug_assert!(node.address.i == i);
-      values.push(Value { i, value: payload });
+      values.push(Value { i, value: payload.as_ref().clone() });
       i += 1;
     }
     Ok(values)
@@ -930,14 +998,14 @@ impl Query {
 
 /// 指定されたカーソルの現在の位置からエントリを読み込みます。
 /// 正常終了時のカーソルは次のエントリを指しています。
-fn read_entry<C>(r: &mut C, i_expected: Index) -> Result<Entry>
+fn read_entry<C>(r: &mut C, expected_index: Index) -> Result<Entry>
 where
   C: io::Read + io::Seek,
 {
   let position = r.stream_position()?;
   let mut hasher = HighwayHasher::new(Key(CHECKSUM_HW64_KEY));
   let mut r = HashRead::new(r, &mut hasher);
-  let entry = read_entry_without_check(&mut r, position, i_expected)?;
+  let entry = read_entry_without_check(&mut r, position, expected_index)?;
 
   // オフセットの検証
   let offset = r.length();
@@ -971,14 +1039,14 @@ where
 
 /// 指定されたカーソルの現在の位置からエントリを読み込みます。トレイラーの offset と checksum は読み込まれない
 /// ため、正常終了時のカーソルは offset の位置を指しています。
-fn read_entry_without_check(r: &mut dyn io::Read, position: u64, i_expected: Index) -> Result<Entry> {
+fn read_entry_without_check(r: &mut dyn io::Read, position: u64, expected_index: Index) -> Result<Entry> {
   let mut hash = [0u8; HASH_SIZE];
 
   // 中間ノードの読み込み
   let inodes = read_inodes(r, position)?;
   let i = inodes.first().map(|inode| inode.meta.address.i).unwrap_or(1);
-  if i != i_expected && i_expected != 0 {
-    return Err(Detail::IncorrectNodeBoundary { at: position });
+  if i != expected_index && expected_index != 0 {
+    return Err(Error::IncorrectNodeBoundary { at: position });
   }
 
   // 葉ノードの読み込み
@@ -986,7 +1054,7 @@ fn read_entry_without_check(r: &mut dyn io::Read, position: u64, i_expected: Ind
   let mut payload = vec![0u8; payload_size as usize];
   r.read_exact(&mut payload)?;
   r.read_exact(&mut hash)?;
-  let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), Hash::new(hash)), payload };
+  let enode = ENode { meta: MetaInfo::new(Address::new(i, 0, position), Hash::new(hash)), payload: Arc::new(payload) };
 
   Ok(Entry { enode, inodes })
 }
@@ -1017,12 +1085,13 @@ fn read_inodes(r: &mut dyn io::Read, position: u64) -> Result<Vec<INode>> {
 
 /// 指定されたカーソルにエントリを書き込みます。
 /// このエントリに対して書き込みが行われた長さを返します。
-fn write_entry(w: &mut dyn Write, e: &Entry) -> Result<usize> {
+fn write_entry<W: Write>(writer: &mut W, e: &Entry) -> Result<usize> {
   debug_assert!(e.enode.payload.len() <= MAX_PAYLOAD_SIZE);
   debug_assert!(e.inodes.len() <= 0xFF);
 
+  let mut buffer = Vec::with_capacity(1024);
   let mut hasher = HighwayHasher::new(Key(CHECKSUM_HW64_KEY));
-  let mut w = HashWrite::new(w, &mut hasher);
+  let mut w = HashWrite::new(&mut buffer, &mut hasher);
 
   // 中間ノードの書き込み
   w.write_u64::<LittleEndian>(e.enode.meta.address.i)?;
@@ -1046,8 +1115,11 @@ fn write_entry(w: &mut dyn Write, e: &Entry) -> Result<usize> {
 
   // チェックサムの書き込み
   w.write_u64::<LittleEndian>(w.finish())?;
+  w.flush()?;
 
-  Ok(w.length() as usize)
+  writer.write_all(&buffer)?;
+  writer.flush()?;
+  Ok(buffer.len())
 }
 
 /// `root` に指定された中間ノードを部分木構造のルートとして b_{i,*} に該当する葉ノードと中間ノードを含んでいる

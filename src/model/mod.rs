@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 #[cfg(test)]
 mod test;
 
-/// Slate がインデックス i として使用する整数の型です。`u64` を表しています。
+/// Slate がインデックス i として使用する整数の型です。通常は `u64` を表しています。
 ///
 /// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
 /// ことができます。

@@ -1,7 +1,5 @@
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum Detail {
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
   // ローカルファイルのオープンに失敗
   #[error("Failed to open local file {file}; {message}")]
   FailedToOpenLocalFile { file: String, message: String },
