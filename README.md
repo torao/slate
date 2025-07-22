@@ -1,6 +1,8 @@
 # Slate: Stratified Hash Tree
 <!-- 多層 multi-layer, multi-tier -->
 
+[![Build](https://github.com/torao/stratified-hash-tree/actions/workflows/build.yml/badge.svg)](https://github.com/torao/stratified-hash-tree/actions/workflows/build.yml)
+
 不変で木構造の完全な履歴を保持する効率的な追記指向のハッシュツリー (Merkle Tree) 構造である Stratified Hash Tree について説明します (同様のデータ構造やアルゴリズム十分に調査したわけではないが、ここで述べるアルゴリズムに関する呼称や研究などを見つけられていないため、ここでは SLATE という名前で呼びます)。これはログ構造のデータベースとして使用することができる。
 
 ## Slate の特徴
