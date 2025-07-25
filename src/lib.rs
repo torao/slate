@@ -196,11 +196,6 @@ impl ValuesWithBranches {
 
 // --------------------------------------------------------------------------
 
-/// [`Hash::hash()`] によって得られるハッシュ値のバイトサイズを表す定数です。デフォルトの `feature = "sha256"`
-/// ビルドでは 32 を表します。
-#[deprecated]
-pub const HASH_SIZE: usize = Hash::SIZE;
-
 /// ハッシュ木が使用するハッシュ値です。
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub struct Hash {
@@ -208,14 +203,14 @@ pub struct Hash {
 }
 
 impl Hash {
-  /// [`Hash::hash()`] によって得られるハッシュ値のバイトサイズを表す定数です。デフォルトの `feature = "sha256"`
-  /// ビルドでは 32 を表します。
   #[cfg(feature = "highwayhash64")]
   pub const SIZE: usize = 8;
 
   #[cfg(any(feature = "sha224", feature = "sha512_224"))]
   pub const SIZE: usize = 28;
 
+  /// [`Hash::hash()`] によって得られるハッシュ値のバイトサイズを表す定数です。デフォルトの `feature = "sha256"`
+  /// ビルドでは 32 を表します。
   #[cfg(any(feature = "sha256", feature = "sha512_256"))]
   pub const SIZE: usize = 32;
 
