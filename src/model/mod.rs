@@ -81,12 +81,13 @@ pub struct NthGenHashTree {
 impl NthGenHashTree {
   /// 木構造 𝑇ₙ に含まれる独立した完全二分木のルートノードとそれらを接続する中間ノードを算出します。この列は木構造の
   /// 左に存在する完全二分木が先に来るように配置されています。
-  pub fn new(n: Index) -> NthGenHashTree {
+  /// 時間/空間計算量は O(log n) です。
+  pub fn new(n: Index) -> Self {
     debug_assert_ne!(0, n);
-    let pbst_roots = NthGenHashTree::create_pbst_roots(n);
-    let ephemeral_nodes = NthGenHashTree::create_ephemeral_nodes(n, &pbst_roots);
+    let pbst_roots = Self::create_pbst_roots(n);
+    let ephemeral_nodes = Self::create_ephemeral_nodes(n, &pbst_roots);
     debug_assert_ne!(0, pbst_roots.len());
-    NthGenHashTree { n, pbst_roots, ephemeral_nodes }
+    Self { n, pbst_roots, ephemeral_nodes }
   }
 
   /// このハッシュ木の世代を参照します。
@@ -110,6 +111,7 @@ impl NthGenHashTree {
   }
 
   /// この世代で追加される中間ノードを列挙します。
+  /// 返値のリストは葉ノードからの順番 (つまり j の小さい順) になります。
   pub fn inodes(&self) -> Vec<INode> {
     let mut inodes = Vec::<INode>::with_capacity(ceil_log2(self.n) as usize);
     for inode in self.ephemeral_nodes() {
@@ -124,6 +126,7 @@ impl NthGenHashTree {
         inodes.push(INode::new(Node::new(i, j), left, right))
       }
     }
+    inodes.reverse();
     inodes
   }
 
@@ -217,7 +220,7 @@ impl NthGenHashTree {
     INode::new(Node::new(i, j), Node::new(i - (1 << (j - 1)), j - 1), Node::new(i, j - 1))
   }
 
-  /// 完全二分木のルートノードを構築します。
+  /// T_n に含まれる完全二分木のルートノードを構築します。
   fn create_pbst_roots(n: Index) -> Vec<Node> {
     let capacity = ceil_log2(n) as usize;
     let mut remaining = n;
@@ -250,16 +253,34 @@ impl NthGenHashTree {
   }
 }
 
-/// 指定されたノード b_{i,j} をルートとする部分木に含まれる葉ノード b_ℓ の範囲を算出します。
+/// 任意のノード b_{i,j} をルートとする部分木に含まれる葉ノード b_ℓ の範囲を O(1) で算出します。
 #[inline]
 pub fn range(i: Index, j: u8) -> RangeInclusive<Index> {
   debug_assert!(j <= 64); // i=u64::MAX のとき j=64
-  let i_min = (((i as u128 >> j) - (if is_pbst(i, j) { 1 } else { 0 })) << j) as u64 + 1;
+  // let i_min = (((i as u128 >> j) - (if is_pbst(i, j) { 1 } else { 0 })) << j) as u64 + 1;
+  let i_min = i - mod2pow(i - 1, j);
   let i_max = i;
   i_min..=i_max
 }
 
-/// 指定されたノード b_{i,j} をルートとする部分木にノード b_{k,\*} が含まれているかを判定します。これは T_{k,*} が
+/// 任意のノード b_{i,j} をルートとする部分木 T_{i,j} に含まれている葉ノードの数 r_{i,j} を O(1) で算出します。
+#[inline]
+pub fn leaf_count(i: Index, j: u8) -> Index {
+  mod2pow(i - 1, j) + 1
+}
+
+/// 指定されたノード b_{i,j} の左右の枝に接続されているノード b_{il,jl} と b_{ir,jr} のインデックスを O(1) で算出します。
+#[inline]
+pub fn subnodes(i: Index, j: u8) -> ((Index, u8), (Index, u8)) {
+  debug_assert!(j > 0 && j <= 64);
+  let il = i - mod2pow(i - 1, j) + pow(j - 1) - 1;
+  let jl = j - 1;
+  let ir = i;
+  let jr = ceil_log2(i - il);
+  ((il, jl), (ir, jr))
+}
+
+/// 指定されたノード b_{i,j} をルートとする部分木にノード b_{k,\*} が含まれているかを O(1) で判定します。これは T_{k,*} が
 /// T_{i,j} の部分木かを判定することと意味的に同じです。
 #[inline]
 pub fn contains(i: Index, j: u8, k: Index) -> bool {
@@ -267,10 +288,24 @@ pub fn contains(i: Index, j: u8, k: Index) -> bool {
   range(i, j).contains(&k)
 }
 
-/// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを判定します。
+/// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを O(1) で判定します。
 #[inline]
 pub fn is_pbst(i: Index, j: u8) -> bool {
-  i & (((1u128 << j) - 1) as u64) == 0
+  mod2pow(i, j) == 0
+}
+
+/// i mod 2^j を O(1) で算出します。
+#[inline]
+fn mod2pow(i: Index, j: u8) -> Index {
+  debug_assert!(j <= 64);
+  i & (((1u128 << j) - 1) as Index)
+}
+
+/// 2^j を O(1) で算出します。
+#[inline]
+fn pow(j: u8) -> Index {
+  debug_assert!(j < 64);
+  1u64 << j
 }
 
 /// 指定された `x` に対して `𝑦=⌈log₂ 𝑥⌉` を求めます。返値は 0 (x=1) から 64 (x=u64::MAX) の範囲となります。

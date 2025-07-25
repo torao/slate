@@ -34,7 +34,7 @@ fn test_generation() {
   // 高さ j の完全二分木の次のケース
   let post_pbt = |j: u8| -> X { X((1 << j) + 1, vec![j + 1], vec![j + 1], vec![(1 << j, j), ((1 << j) + 1, 0)]) };
 
-  for X(n, inode_js, ephemeral_js, pbst_roots) in vec![
+  for X(n, mut inode_js, ephemeral_js, pbst_roots) in vec![
     X(1, vec![], vec![], vec![(1u64, 0u8)]),
     X(2, vec![1u8], vec![], vec![(2, 1)]),
     X(3, vec![2], vec![2u8], vec![(2, 1), (3, 0)]),
@@ -79,6 +79,7 @@ fn test_generation() {
     assert_eq!(expected, actual);
 
     // n-th 世代の中間ノード
+    inode_js.reverse();
     let expected = inode_js.iter().map(|j| Node::new(n, *j)).collect::<Vec<Node>>();
     let actual = generation.inodes().iter().map(|i| i.node).collect::<Vec<Node>>();
     assert_eq!(expected, actual);
