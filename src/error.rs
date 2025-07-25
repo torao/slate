@@ -4,6 +4,7 @@ pub enum Error {
   #[error("Failed to open local file {file}; {message}")]
   FailedToOpenLocalFile { file: String, message: String },
 
+  // TODO 名前変更
   // ストレージの内容が Slate ではない
   #[error("The contents of storage are not for Slate: {message}")]
   FileIsNotContentsOfLMTHTree { message: &'static str },
@@ -47,6 +48,9 @@ pub enum Error {
     #[from]
     source: std::io::Error,
   },
+
+  #[error("The traversal function returned an error during the walk down: {0}")]
+  WalkDown(Box<dyn std::error::Error>),
 
   #[error("{source}")]
   Otherwise {

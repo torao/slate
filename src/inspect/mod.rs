@@ -6,7 +6,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use highway::{HighwayHasher, Key};
 
 use crate::checksum::HashRead;
-use crate::{CHECKSUM_HW64_KEY, HASH_SIZE, Hash, Result, STORAGE_IDENTIFIER, hex, is_version_compatible};
+use crate::storage::CHECKSUM_HW64_KEY;
+use crate::{Hash, Result, STORAGE_IDENTIFIER, hex, is_version_compatible};
 
 pub trait SeekRead: Seek + std::io::Read {}
 
@@ -32,7 +33,7 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
 
   let mut location = HashMap::<u64, u64>::new();
   let mut hashes = HashMap::<(u64, u8), Hash>::new();
-  let mut hash = [0u8; HASH_SIZE];
+  let mut hash = [0u8; Hash::SIZE];
   while cursor.stream_position()? < eof {
     let position = cursor.stream_position()?;
     let mut hasher = HighwayHasher::new(Key(CHECKSUM_HW64_KEY));
