@@ -1,5 +1,4 @@
-use mt19937::MT19937;
-use rand::RngCore;
+use std::cmp::min;
 use std::env::temp_dir;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
@@ -193,14 +192,16 @@ fn build_entry(i: Index, value: &[u8], positions: &[Index]) -> Entry {
   Entry::new(enode, inodes)
 }
 
-pub fn random_payload(length: usize, s: u64) -> Vec<u8> {
-  let mut seed = [0u32; 2];
-  seed[0] = (s & 0xFFFFFFFF) as u32;
-  seed[1] = ((s >> 8) & 0xFFFFFFFF) as u32;
-  let mut rand = MT19937::new_with_slice_seed(&seed);
-  let mut bytes = vec![0u8; length];
-  rand.fill_bytes(&mut bytes);
-  bytes
+pub fn random_payload(length: usize, seed: u64) -> Vec<u8> {
+  let mut buffer = Vec::with_capacity(length);
+  let mut rand = seed;
+  while buffer.len() < length {
+    rand = splitmix64(rand);
+    let bytes = rand.to_be_bytes();
+    let len = min(bytes.len(), length - buffer.len());
+    buffer.extend_from_slice(&bytes[..len]);
+  }
+  buffer
 }
 
 /// 指定された接頭辞と接尾辞を持つ 0 バイトのテンポラリファイルをシステムのテンポラリディレクトリ上に作成します。

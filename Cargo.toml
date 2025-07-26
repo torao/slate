@@ -16,8 +16,6 @@ sha2 = "0.10"
 clap = "4"
 
 [dev-dependencies]
-rand = "0.9"
-mt19937 = "3"
 
 [features]
 default = ["sha256", "panic_over_inconsistency"]
