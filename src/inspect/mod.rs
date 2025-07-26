@@ -1,12 +1,9 @@
 use std::collections::HashMap;
-use std::hash::Hasher;
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use highway::{HighwayHasher, Key};
 
-use crate::checksum::HashRead;
-use crate::storage::CHECKSUM_HW64_KEY;
+use crate::checksum::ChecksumRead;
 use crate::{Hash, Result, STORAGE_IDENTIFIER, hex, is_version_compatible};
 
 pub trait SeekRead: Seek + std::io::Read {}
@@ -36,8 +33,7 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
   let mut hash = [0u8; Hash::SIZE];
   while cursor.stream_position()? < eof {
     let position = cursor.stream_position()?;
-    let mut hasher = HighwayHasher::new(Key(CHECKSUM_HW64_KEY));
-    let mut r = HashRead::new(cursor, &mut hasher);
+    let mut r = ChecksumRead::new(cursor);
 
     // エントリ
     let i = r.read_u64::<LittleEndian>()?;
@@ -65,10 +61,8 @@ pub fn report<T: AsRef<[u8]>>(cursor: &mut std::io::Cursor<T>) -> Result<()> {
     hashes.insert((i, 0), Hash::new(hash));
 
     // トレイラー
-    let offset = r.read_u32::<LittleEndian>()?;
-    let trailer_position = cursor.position() - 4;
-    let actual_checksum = hasher.finish();
-    let checksum = cursor.read_u64::<LittleEndian>()?;
+    let (_, (offset, checksum), (_, actual_checksum)) = r.read_delimiter()?;
+    let trailer_position = cursor.position();
 
     println!("--------");
     println!("ENTRY: {i} @{position}");

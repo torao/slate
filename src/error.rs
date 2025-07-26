@@ -27,7 +27,7 @@ pub enum Error {
 
   // エントリ先頭へのオフセットが間違っている
   #[error("DAMAGED STORAGE: incorrect entry-head offset field; recorded as {expected}, but actually {actual}")]
-  IncorrectEntryHeadOffset { expected: u32, actual: u64 },
+  IncorrectEntryHeadOffset { expected: u32, actual: u32 },
 
   // チェックサム検査に失敗
   #[error(

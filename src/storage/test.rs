@@ -1,15 +1,13 @@
+use crate::checksum::hasher;
 use crate::model::NthGenHashTree;
-use crate::storage::{read_entry, read_entry_without_check, read_inodes, write_entry};
+use crate::storage::{read_entry, read_inodes, write_entry};
 use crate::test::{random_payload, temp_file, verify_storage_spec};
-use crate::{Address, CHECKSUM_HW64_KEY, ENode, Entry, FileStorage, Hash, INode, Index, MemStorage, MetaInfo, Result};
+use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, Index, MetaInfo, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use highway::{HighwayBuildHasher, Key};
 use std::fs::remove_file;
-use std::hash::BuildHasher;
 use std::hash::Hasher;
-use std::io::{self, Write};
+use std::io::{self, Cursor, Write};
 use std::io::{Seek, SeekFrom};
-use std::sync::Arc;
 
 /// 単一のエントリの直列化と復元をテストします。
 #[test]
@@ -17,28 +15,23 @@ fn entry_serialization() -> Result<()> {
   for entry in sample_entries() {
     // メモリ上に書き込みを行いサイズを確認
     let mut buffer = Vec::new();
-    let write_length = write_entry(&mut buffer, &entry)?;
-    assert_eq!(write_length, buffer.len());
+    let written_length = write_entry(&mut Cursor::new(&mut buffer), &entry)?;
+    assert_eq!(written_length, buffer.len());
 
-    // チェックサムが実際に書き込まれたバイナリに対するものであることを確認
-    verify_checksum(&buffer);
+    // バッファの末尾に u64 で書き込まれたチェックサムが存在することを確認
+    verify_the_u64_at_the_end_is_checksum(&buffer);
 
     let expected = entry;
 
     // 中間ノードのみを読み出して同一かを確認
     let mut cursor = io::Cursor::new(buffer.clone());
-    cursor.set_position(0);
-    let inodes = read_inodes(&mut cursor, 0)?;
+    let (index, inodes) = read_inodes(&mut cursor)?;
+    assert_eq!(expected.enode.meta.address.i, index);
     assert_eq!(expected.inodes, inodes);
 
-    // チェックサムによるチェックなし版から復元して元のエントリと同一かを確認
+    // エントリ全体を読み出して同一かを確認
     cursor.set_position(0);
-    let actual = read_entry_without_check(&mut cursor, 0, None)?;
-    assert_eq!(expected, actual);
-
-    // チェックサムによるチェックあり版から復元して元のエントリと同一かを確認
-    cursor.set_position(0);
-    let actual = read_entry(&mut cursor, None)?;
+    let actual = read_entry(&mut cursor)?;
     assert_eq!(expected, actual);
   }
   Ok(())
@@ -51,11 +44,11 @@ fn garbled_at_any_position() -> Result<()> {
   for entry in sample_entries() {
     // 正しく書き込まれたバイナリを取得
     let mut buffer = Vec::new();
-    let write_length = write_entry(&mut buffer, &entry)?;
+    let write_length = write_entry(&mut Cursor::new(&mut buffer), &entry)?;
     assert_eq!(write_length, buffer.len());
 
     let mut cursor = io::Cursor::new(buffer.clone());
-    assert_eq!(entry, read_entry(&mut cursor, None)?);
+    assert_eq!(entry, read_entry(&mut cursor)?);
 
     for position in 0u64..buffer.len() as u64 {
       // データ破損の設定
@@ -64,10 +57,10 @@ fn garbled_at_any_position() -> Result<()> {
       cursor.seek(SeekFrom::Current(-1))?;
       cursor.write_u8(!correct)?;
 
-      // データ破損に対して LSHT::read_entry() でエラーが発生することを検証
+      // データ破損に対して read_entry() でエラーが発生することを検証
       // TODO 最終的に、どのフィールドのバイト値が破損したかを識別して想定したエラーが検知されていることを確認する
       cursor.seek(SeekFrom::Start(0))?;
-      let result = read_entry(&mut cursor, None);
+      let result = read_entry(&mut cursor);
       assert!(result.is_err(), "{result:?}");
 
       // 破損したデータをもとに戻す
@@ -81,38 +74,31 @@ fn garbled_at_any_position() -> Result<()> {
 /// ファイルストレージの適合テスト。
 #[test]
 fn test_file_storage() {
-  let file = temp_file("slate-storage", ".db");
-  let mut storage = FileStorage::new(&file).unwrap();
+  let path = temp_file("slate-storage", ".db");
+  let mut storage = BlockStorage::from_file(&path, false).unwrap();
   verify_storage_spec(&mut storage);
-  remove_file(&file).unwrap_or_else(|_| panic!("failed to remove temporary file: {}", file.to_string_lossy()));
+  remove_file(&path).unwrap_or_else(|_| panic!("failed to remove temporary file: {}", path.to_string_lossy()));
 }
 
 /// メモリーストレージの適合テスト
 #[test]
 fn test_memory_storage() {
-  verify_storage_spec(&mut MemStorage::new());
+  verify_storage_spec(&mut BlockStorage::memory());
 }
 
 /// エントリの直列表現のチェックサムを検証します。
-fn verify_checksum(entry: &[u8]) {
-  let mut cursor = io::Cursor::new(entry);
+fn verify_the_u64_at_the_end_is_checksum(entry_buffer: &[u8]) {
+  let mut cursor = io::Cursor::new(entry_buffer);
 
-  // エントリの直列化表現に記録されているチェックサムを参照
-  cursor.seek(SeekFrom::End(-8)).unwrap();
+  // エントリの直列化表現に記録されているチェックサムを読み出し
+  cursor.seek(SeekFrom::End(-(u64::BITS as i64) / 8)).unwrap();
   let expected = cursor.read_u64::<LittleEndian>().unwrap();
 
   // エントリの実際のチェックサムを算出
-  let actual = checksum(&entry[0..entry.len() - 8]);
-
+  let mut hasher = hasher();
+  hasher.write_all(&entry_buffer[..(entry_buffer.len() - u64::BITS as usize / 8)]).unwrap();
+  let actual = hasher.finish();
   assert_eq!(expected, actual);
-}
-
-/// 指定されたバイナリデータに対するチェックサムを算出。
-fn checksum(bytes: &[u8]) -> u64 {
-  let builder = HighwayBuildHasher::new(Key(CHECKSUM_HW64_KEY));
-  let mut hasher = builder.build_hasher();
-  hasher.write_all(bytes).unwrap();
-  hasher.finish()
 }
 
 // TODO ストレージ末尾の 4 バイトの指す位置がたまたま最後より前の要素だった場合に、その要素を最後の要素とみなして
@@ -133,7 +119,7 @@ fn create_sample_entry(i: Index, payload: Vec<u8>) -> Entry {
   let model = NthGenHashTree::new(i);
   let enode = ENode {
     meta: MetaInfo { address: Address { i, j: 0, position }, hash: Hash::new([0; crate::Hash::SIZE]) },
-    payload: Arc::new(payload),
+    payload,
   };
   let inodes = model
     .inodes()

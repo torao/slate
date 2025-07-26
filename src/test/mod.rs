@@ -22,7 +22,7 @@ fn test_multi_threaded_query() {
         for i in 0..=N {
           if let Some(value) = query.get(i).unwrap() {
             assert!(i > 0 || i <= n);
-            assert_eq!(&random_payload(PAYLOAD_SIZE, i), value.as_ref());
+            assert_eq!(&random_payload(PAYLOAD_SIZE, i), &value);
           } else {
             assert!(i == 0 || i > n, "None for i={i}, n={n}");
           }
@@ -42,7 +42,7 @@ fn test_multi_threaded_query() {
 fn test_bootstrap() {
   // 未初期化の空のストレージを指定してファイル識別子が書き込まれることを確認
   let buffer = Arc::new(RwLock::new(Vec::new()));
-  let storage = MemStorage::with(buffer.clone());
+  let storage = BlockStorage::from_buffer(buffer.clone(), false);
   let db = Slate::new(storage).unwrap();
   let content = buffer.read().unwrap();
   let mut query = db.snapshot().query().unwrap();
@@ -63,7 +63,7 @@ fn test_bootstrap() {
     .map(|values| {
       // 疑似ランダムな列の直列化形式を取得
       let buffer = Arc::new(RwLock::new(Vec::new()));
-      let storage = MemStorage::with(buffer.clone());
+      let storage = BlockStorage::from_buffer(buffer.clone(), false);
       let mut db = Slate::new(storage).unwrap();
       for value in values.iter() {
         db.append(value).unwrap();
@@ -75,13 +75,13 @@ fn test_bootstrap() {
 
   // 0..n 個のエントリの直列化が保存されているストレージからデータ列を復元できることを確認
   for (values, buffer) in samples {
-    let storage = MemStorage::with(Arc::new(RwLock::new(buffer)));
+    let storage = BlockStorage::from_buffer(Arc::new(RwLock::new(buffer)), false);
     let db = Slate::new(storage).unwrap();
     let mut query = db.snapshot().query().unwrap();
     for (i, expected) in values.iter().enumerate() {
       println!("{}/{}: {expected:?}", i + 1, db.n());
       let actual = query.get(i as u64 + 1).unwrap().unwrap();
-      assert_eq!(expected, actual.as_ref());
+      assert_eq!(expected, &actual);
     }
     match db.root() {
       Some(root) => {
@@ -108,7 +108,7 @@ fn test_append_and_get() {
       let expected = random_payload(PAYLOAD_SIZE, i + 1);
       let value = query.get(i + 1).unwrap();
       assert!(value.is_some());
-      assert_eq!(&expected, value.unwrap().as_ref());
+      assert_eq!(&expected, &value.unwrap());
     }
 
     // 範囲外のノードを参照
@@ -118,9 +118,9 @@ fn test_append_and_get() {
 }
 
 /// n 個の要素を持つ Slate を構築します。それぞれの要素は乱数で初期化された `payload_size` サイズの値を持ちます。
-fn prepare_db(n: u64, payload_size: usize) -> Slate<MemStorage> {
+fn prepare_db(n: u64, payload_size: usize) -> Slate<BlockStorage<MemoryDevice>> {
   let buffer = Arc::new(RwLock::new(Vec::<u8>::with_capacity(4 * 1024)));
-  let storage = MemStorage::with(buffer.clone());
+  let storage = BlockStorage::from_buffer(buffer.clone(), false);
   let mut db = Slate::new(storage).unwrap();
 
   for i in 0..n {
@@ -143,7 +143,6 @@ pub fn verify_storage_spec<S: Storage>(storage: &mut S) {
   // 書き込みと読み込みを相互に実行
   let mut positions = [first_position].to_vec();
   for i in 0..1024 {
-    // let value = splitmix64(i as u64);
     if positions.len() == 1 || splitmix64(i as u64) < u64::MAX / 2 {
       // 書き込みの実行
       let i = positions.len() as u64;
@@ -159,12 +158,12 @@ pub fn verify_storage_spec<S: Storage>(storage: &mut S) {
       let value = i.to_le_bytes().to_vec();
       let expected = build_entry(i, &value, &positions);
 
-      let mut cursor = storage.cursor().unwrap();
-      let entry = cursor.get(position, i).unwrap();
+      let mut cursor = storage.reader().unwrap();
+      let entry = cursor.read_entry(position).unwrap();
       assert_eq!(i, entry.enode.meta.address.i);
       assert_eq!(0, entry.enode.meta.address.j);
       assert_eq!(position, entry.enode.meta.address.position);
-      assert_eq!(&value, entry.enode.payload.as_ref());
+      assert_eq!(&value, &entry.enode.payload);
       let hash = Hash::from_bytes(&value);
       assert_eq!(hash, entry.enode.meta.hash);
       assert_eq!(&expected, &entry);
@@ -175,10 +174,8 @@ pub fn verify_storage_spec<S: Storage>(storage: &mut S) {
 fn build_entry(i: Index, value: &[u8], positions: &[Index]) -> Entry {
   let position = positions[i as usize - 1];
   let model = NthGenHashTree::new(i);
-  let enode = ENode {
-    meta: MetaInfo::new(Address::new(i, 0, position), Hash::from_bytes(value)),
-    payload: Arc::new(value.to_vec()),
-  };
+  let enode =
+    ENode { meta: MetaInfo::new(Address::new(i, 0, position), Hash::from_bytes(value)), payload: value.to_vec() };
   let inodes = model
     .inodes()
     .iter()
@@ -221,7 +218,7 @@ pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
   panic!("cannot create new temporary file: {}{}{}nnn{}", dir.to_string_lossy(), MAIN_SEPARATOR, prefix, suffix);
 }
 
-fn splitmix64(x: u64) -> u64 {
+pub fn splitmix64(x: u64) -> u64 {
   let mut z = x;
   z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
   z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);

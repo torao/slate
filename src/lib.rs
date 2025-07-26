@@ -9,8 +9,8 @@
 //! # Examples
 //!
 //! ```rust
-//! use slate::{MemStorage, Slate, Value, Node};
-//! let mut db = Slate::new(MemStorage::new()).unwrap();
+//! use slate::{BlockStorage, Slate, Value, Node};
+//! let mut db = Slate::new(BlockStorage::memory()).unwrap();
 //!
 //! // Returns None for non-existent indices.
 //! let mut query = db.snapshot().query().unwrap();
@@ -22,7 +22,7 @@
 //! let root = db.append(first).unwrap();
 //! let mut query = db.snapshot().query().unwrap();
 //! assert_eq!(1, root.i);
-//! assert_eq!(first, query.get(root.i).unwrap().unwrap().as_ref());
+//! assert_eq!(first, query.get(root.i).unwrap().unwrap());
 //! assert_eq!(None, query.get(2).unwrap());
 //!
 //! // Similar to the typical hash tree, you can refer to a verifiable value using root hash.
@@ -49,8 +49,9 @@
 use crate::error::Error;
 use crate::error::Error::*;
 use crate::model::{NthGenHashTree, ceil_log2, contains, subnodes};
+use crate::serialize::{read_entry_from, read_inodes_from, write_entry_to};
 use std::fmt::{Debug, Display, Formatter};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::Arc;
 
 pub(crate) mod checksum;
@@ -59,6 +60,7 @@ pub mod inspect;
 pub mod model;
 mod storage;
 pub use storage::*;
+mod serialize;
 
 #[cfg(test)]
 pub mod test;
@@ -316,7 +318,13 @@ impl INode {
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ENode {
   pub meta: MetaInfo,
-  pub payload: Arc<Vec<u8>>,
+  pub payload: Vec<u8>,
+}
+
+impl ENode {
+  pub fn new(meta: MetaInfo, payload: Vec<u8>) -> Self {
+    ENode { meta, payload }
+  }
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -335,6 +343,18 @@ impl Entry {
   pub fn new(enode: ENode, inodes: Vec<INode>) -> Self {
     debug_assert!(inodes.iter().map(|i| i.meta.address.j).collect::<Vec<_>>().windows(2).all(|w| w[0] < w[1]));
     Entry { enode, inodes }
+  }
+
+  pub fn read_inodes_from<R: Read>(r: &mut R, position: Position) -> Result<(Index, Vec<INode>)> {
+    read_inodes_from(r, position)
+  }
+
+  pub fn read_from<R: Read>(r: &mut R, position: Position) -> Result<Entry> {
+    read_entry_from(r, position)
+  }
+
+  pub fn write_to<W: Write>(&self, w: &mut W) -> Result<usize> {
+    write_entry_to(self, w)
   }
 }
 
@@ -421,7 +441,7 @@ impl<'a, S: Storage> Snapshot<'a, S> {
   }
 
   pub fn query(&self) -> Result<Query> {
-    let cursor = self.storage.cursor()?;
+    let cursor = self.storage.reader()?;
     let revision = self.cache.clone();
     Ok(Query { cursor, revision })
   }
@@ -446,16 +466,16 @@ impl<S: Storage> Slate<S> {
   /// 以下はシステムのテンポラリディレクトリ上の `slate-example.db` にハッシュ木を直列化する例です。
   ///
   /// ```rust
-  /// use slate::{FileStorage,Slate,Storage,Result};
+  /// use slate::{BlockStorage,Slate,Storage,Result};
   /// use std::env::temp_dir;
   /// use std::fs::remove_file;
   /// use std::path::PathBuf;
   ///
   /// fn append_and_get(file: &PathBuf) -> Result<()>{
-  ///   let storage = FileStorage::new(file)?;
+  ///   let storage = BlockStorage::from_file(file, false)?;
   ///   let mut db = Slate::new(storage)?;
   ///   let root = db.append(&[0u8, 1, 2, 3])?;
-  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.snapshot().query()?.get(root.i)?.map(|x| x.as_ref().clone()));
+  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.snapshot().query()?.get(root.i)?.map(|x| x.clone()));
   ///   Ok(())
   /// }
   ///
@@ -498,12 +518,12 @@ impl<S: Storage> Slate<S> {
     let cache = match latest_entry {
       Some(entry) => {
         // PBST ルートノードの読み込み
-        let mut cursor = storage.cursor()?;
+        let mut cursor = storage.reader()?;
         let mut pbst_roots = Vec::with_capacity(entry.inodes.len());
         for inode in entry.inodes.iter() {
           let position = inode.left.position;
           let i_expected = inode.left.i;
-          let entry = cursor.get(position, i_expected)?;
+          let entry = read_entry_with_index_check(&mut cursor, position, i_expected)?;
           let Entry { enode, mut inodes } = entry;
           let pbst_root = inodes.pop().map(PbstRoot::INode).unwrap_or(PbstRoot::ENode(enode));
           pbst_roots.push(pbst_root);
@@ -532,7 +552,7 @@ impl<S: Storage> Slate<S> {
     let i = self.latest_cache.root().map(|node| node.i + 1).unwrap_or(1);
     let hash = Hash::from_bytes(value);
     let meta = MetaInfo::new(Address::new(i, 0, position), hash);
-    let enode = ENode { meta, payload: Arc::new(Vec::from(value)) };
+    let enode = ENode { meta, payload: Vec::from(value) };
 
     // 中間ノードとその左枝にある PBST ルートの構築
     let mut inodes = Vec::<INode>::with_capacity(INDEX_SIZE as usize);
@@ -598,7 +618,7 @@ pub struct AuthPath {
 }
 
 pub struct Query {
-  cursor: Box<dyn Cursor>,
+  cursor: Box<dyn EntryReader>,
   revision: Arc<Cache>,
 }
 
@@ -610,7 +630,7 @@ impl Query {
 
   pub fn walk_down<F, E>(&mut self, callback: &mut F) -> Result<()>
   where
-    F: FnMut(Index, Index, u8, &Hash, Option<&Arc<Vec<u8>>>) -> std::result::Result<WalkDirection, E>,
+    F: FnMut(Index, Index, u8, &Hash, Option<&[u8]>) -> std::result::Result<WalkDirection, E>,
     E: std::error::Error + 'static,
   {
     let cache_opt = &self.revision.clone().0;
@@ -621,7 +641,7 @@ impl Query {
 
   fn _walk_down<F, E>(&mut self, node_index: usize, entry: &Entry, callback: &mut F) -> Result<()>
   where
-    F: FnMut(Index, Index, u8, &Hash, Option<&Arc<Vec<u8>>>) -> std::result::Result<WalkDirection, E>,
+    F: FnMut(Index, Index, u8, &Hash, Option<&[u8]>) -> std::result::Result<WalkDirection, E>,
     E: std::error::Error + 'static,
   {
     let i = entry.enode.meta.address.i;
@@ -633,7 +653,7 @@ impl Query {
       (node.meta.address.j, &node.meta.hash, None)
     };
 
-    let dir = (callback)(self.revision(), i, j, hash, value).map_err(|e| Error::WalkDown(Box::new(e)))?;
+    let dir = (callback)(self.revision(), i, j, hash, value.map(|v| &**v)).map_err(|e| Error::WalkDown(Box::new(e)))?;
 
     if node_index == 0 || dir == WalkDirection::Stop {
       return Ok(());
@@ -643,7 +663,7 @@ impl Query {
     }
     if dir == WalkDirection::Left || dir == WalkDirection::Both {
       let current = &entry.inodes[node_index - 1];
-      let left = self.cursor.get(current.left.position, current.left.i)?;
+      let left = read_entry_with_index_check(&mut self.cursor, current.left.position, current.left.i)?;
       debug_assert_eq!(current.left.i, left.enode.meta.address.i);
       debug_assert!(left.enode.meta.address.i < i);
       let left_j = current.left.j;
@@ -670,16 +690,16 @@ impl Query {
 
   /// 指定されたインデックスの値を参照します。
   /// 0 を含む範囲外のインデックスを指定した場合は `None` を返します。
-  pub fn get(&mut self, i: Index) -> Result<Option<Arc<Vec<u8>>>> {
+  pub fn get(&mut self, i: Index) -> Result<Option<Vec<u8>>> {
     if i == 0 || i > self.revision.n() {
       return Ok(None);
     }
     let mut value = None;
-    self.walk_down(&mut |_n, b_i, b_j, _hash, leaf_value: Option<&Arc<Vec<u8>>>| {
+    self.walk_down(&mut |_n, b_i, b_j, _hash, leaf_value: Option<&[u8]>| {
       if b_i == i {
         if b_j == 0 {
           if let Some(v) = leaf_value {
-            value = Some(v.clone());
+            value = Some(v.to_vec());
             println!("{_n}: i={i} = b_i={b_i}, b_j={b_j} == 0: Stop");
             Ok(WalkDirection::Stop)
           } else {
@@ -708,6 +728,22 @@ impl Query {
     F: FnMut(Entry),
   {
     unimplemented!()
+  }
+}
+
+fn read_entry_with_index_check(
+  r: &mut Box<dyn EntryReader>,
+  position: Position,
+  expected_index: Index,
+) -> Result<Entry> {
+  let entry = r.read_entry(position)?;
+  let actual_index = entry.enode.meta.address.i;
+  if actual_index != expected_index {
+    Err(InternalStateInconsistency {
+      message: format!("The index of entry {expected_index} read from {position} was actually {actual_index}"),
+    })
+  } else {
+    Ok(entry)
   }
 }
 
