@@ -1,6 +1,6 @@
 use std::cmp::min;
-use std::env::temp_dir;
-use std::fs::OpenOptions;
+use std::env::temp_dir as temprary_directory;
+use std::fs::{OpenOptions, create_dir_all};
 use std::io::ErrorKind;
 use std::path::{MAIN_SEPARATOR, PathBuf};
 use std::sync::RwLock;
@@ -201,13 +201,13 @@ pub fn random_payload(length: usize, seed: u64) -> Vec<u8> {
   buffer
 }
 
-/// 指定された接頭辞と接尾辞を持つ 0 バイトのテンポラリファイルをシステムのテンポラリディレクトリ上に作成します。
+/// 指定された接頭辞と接尾辞を持つ 0 バイトの一時ファイルをシステムの一時ディレクトリの下に作成します。
 /// 作成したファイルは呼び出し側で削除する必要があります。
 pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
-  let dir = temp_dir();
+  let tmp = temprary_directory();
   for i in 0u16..=u16::MAX {
-    let file_name = format!("{prefix}{i}{suffix}");
-    let mut file = dir.to_path_buf();
+    let file_name = format!("slate-{prefix}{i}{suffix}");
+    let mut file = tmp.to_path_buf();
     file.push(file_name);
     match OpenOptions::new().write(true).create_new(true).open(&file) {
       Ok(_) => return file,
@@ -215,7 +215,22 @@ pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
       Err(err) => panic!("{}", err),
     }
   }
-  panic!("cannot create new temporary file: {}{}{}nnn{}", dir.to_string_lossy(), MAIN_SEPARATOR, prefix, suffix);
+  panic!("cannot create new temporary file: {}{}{}nnn{}", tmp.to_string_lossy(), MAIN_SEPARATOR, prefix, suffix);
+}
+
+/// 指定された接頭辞と接尾辞を持つ空の一時ディレクトリをシステムの一時ディレクトリの下に作成します。
+/// 作成したディレクトリは呼び出し側で削除する必要があります。
+pub fn temp_dir(prefix: &str, suffix: &str) -> PathBuf {
+  let tmp = temprary_directory();
+  for i in 0u16..=u16::MAX {
+    let dir_name = format!("slate-{prefix}{i}{suffix}");
+    let mut dir = tmp.to_path_buf();
+    dir.push(dir_name);
+    if create_dir_all(&dir).is_ok() {
+      return dir;
+    }
+  }
+  panic!("cannot create new temporary directory: {}{}{}nnn{}", tmp.to_string_lossy(), MAIN_SEPARATOR, prefix, suffix);
 }
 
 pub fn splitmix64(x: u64) -> u64 {

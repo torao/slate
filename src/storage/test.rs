@@ -74,9 +74,11 @@ fn garbled_at_any_position() -> Result<()> {
 /// ファイルストレージの適合テスト。
 #[test]
 fn test_file_storage() {
-  let path = temp_file("slate-storage", ".db");
-  let mut storage = BlockStorage::from_file(&path, false).unwrap();
-  verify_storage_spec(&mut storage);
+  let path = temp_file("storage", ".db");
+  {
+    let mut storage = BlockStorage::from_file(&path, false).unwrap();
+    verify_storage_spec(&mut storage);
+  }
   remove_file(&path).unwrap_or_else(|_| panic!("failed to remove temporary file: {}", path.to_string_lossy()));
 }
 

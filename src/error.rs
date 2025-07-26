@@ -1,3 +1,5 @@
+use std::sync::PoisonError;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
   // ローカルファイルのオープンに失敗
@@ -57,4 +59,17 @@ pub enum Error {
     #[from]
     source: Box<dyn std::error::Error>,
   },
+
+  #[cfg(feature = "rocksdb")]
+  #[error("{0}")]
+  RocksDB(#[from] rocksdb::Error),
+
+  #[error("{0}")]
+  LockError(String),
+}
+
+impl<T> From<PoisonError<T>> for Error {
+  fn from(err: PoisonError<T>) -> Self {
+    Error::LockError(err.to_string())
+  }
 }
