@@ -24,6 +24,8 @@
 rustup default stable
 cargo build
 cargo test
+cargo bench
+samply record cargo bench
 ```
 
 The benchamrks have been moved to a different repository.
