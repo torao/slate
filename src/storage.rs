@@ -1,8 +1,7 @@
+use crate::Result;
 use crate::checksum::{ChecksumRead, ChecksumWrite};
 use crate::error::Error;
 use crate::error::Error::*;
-use crate::{Entry, INode, MAX_PAYLOAD_SIZE};
-use crate::{Index, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
@@ -17,27 +16,29 @@ mod test;
 
 pub type Position = u64;
 
-/// ハッシュツリーのエントリを保存するために抽象化されたストレージです。
-pub trait Storage {
-  /// 起動時に呼び出され、現在のエントリと、次のエントリの位置を返します。
-  /// ストレージにまだデータが保存されていない場合は None を返します。
-  fn boot(&mut self) -> Result<(Option<Entry>, Position)>;
-
-  // 指定された位置にエントリの保存します。
-  // 次のエントリの位置を返します。
-  fn put(&mut self, position: Position, entry: &Entry) -> Result<Position>;
-
-  // エントリを読み込むためのカーソルを参照します。
-  fn reader(&self) -> Result<Box<dyn EntryReader>>;
+pub trait Serializable: Sized {
+  fn write<W: Write>(&self, w: &mut W) -> Result<usize>;
+  fn read<R: Read + Seek>(r: &mut R, position: Position) -> Result<Self>;
 }
 
-/// ストレージからエントリを読み込むためのカーソルです。
-pub trait EntryReader {
-  // 指定された位置からエントリを読み出して返します。
-  fn read_entry(&mut self, position: Position) -> Result<Entry>;
+/// ハッシュツリーのデータを保存するために抽象化されたストレージです。
+pub trait Storage<S: Serializable> {
+  /// 起動時に呼び出され、現在のデータと、次のデータの位置を返します。
+  /// ストレージにまだデータが保存されていない場合は None を返します。
+  fn boot(&mut self) -> Result<(Option<S>, Position)>;
 
-  // 指定された位置から中間ノードを読み出して返します。
-  fn read_inodes(&mut self, position: Position) -> Result<(Index, Vec<INode>)>;
+  // 指定された位置にデータの保存します。
+  // 次のデータの位置を返します。
+  fn put(&mut self, position: Position, data: &S) -> Result<Position>;
+
+  // データを読み込むためのカーソルを参照します。
+  fn reader(&self) -> Result<Box<dyn Reader<S>>>;
+}
+
+/// ストレージからデータを読み込むためのカーソルです。
+pub trait Reader<S: Serializable> {
+  // 指定された位置からデータを読み出して返します。
+  fn read(&mut self, position: Position) -> Result<S>;
 }
 
 // ----------------------------------------
@@ -48,15 +49,14 @@ pub trait BlockDevice: Read + Write + Seek {
     Self: std::marker::Sized;
 }
 
-impl<B: BlockDevice> EntryReader for B {
-  fn read_entry(&mut self, position: Position) -> Result<Entry> {
+impl<B: BlockDevice, S: Serializable> Reader<S> for B {
+  fn read(&mut self, position: Position) -> Result<S> {
     self.seek(SeekFrom::Start(position))?;
-    read_entry(self)
-  }
 
-  fn read_inodes(&mut self, position: Position) -> Result<(Index, Vec<INode>)> {
-    self.seek(SeekFrom::Start(position))?;
-    read_inodes(self)
+    let mut read = ChecksumRead::new(self);
+    let data = S::read(&mut read, position)?;
+    read.check_delimiter()?;
+    Ok(data)
   }
 }
 
@@ -102,28 +102,28 @@ impl BlockStorage<FileDevice> {
   }
 }
 
-impl<B: BlockDevice + 'static> Storage for BlockStorage<B> {
-  fn reader(&self) -> Result<Box<dyn EntryReader>> {
+impl<B: BlockDevice + 'static, S: Serializable> Storage<S> for BlockStorage<B> {
+  fn reader(&self) -> Result<Box<dyn Reader<S>>> {
     let device = self.device.clone_device()?;
     Ok(Box::new(device))
   }
 
-  fn boot(&mut self) -> Result<(Option<Entry>, Position)> {
-    let (entry, position) = boot(&mut self.device)?;
+  fn boot(&mut self) -> Result<(Option<S>, Position)> {
+    let (data, position) = boot(&mut self.device)?;
     self.position = position;
-    Ok((entry, position))
+    Ok((data, position))
   }
 
-  fn put(&mut self, position: Position, entry: &Entry) -> Result<Position> {
+  fn put(&mut self, position: Position, data: &S) -> Result<Position> {
     debug_assert_eq!(self.position, position);
-    let length = write_entry(&mut self.device, entry)?;
+    let length = write_data(&mut self.device, data)?;
     self.device.flush()?;
     self.position += length as u64;
     Ok(self.position)
   }
 }
 
-/// ローカルファイルシステムのパスをストレージとして使用する実装です。
+/// ローカルファイルをストレージとして使用する実装です。
 pub struct FileDevice {
   /// 読み出し時にオープンするためのこのファイルのパス。
   path: PathBuf,
@@ -297,7 +297,7 @@ pub(crate) fn is_version_compatible(version: u8) -> bool {
   version <= STORAGE_VERSION
 }
 
-fn boot<C>(cursor: &mut C) -> Result<(Option<Entry>, Position)>
+fn boot<C, S: Serializable>(cursor: &mut C) -> Result<(Option<S>, Position)>
 where
   C: Write + Read + Seek,
 {
@@ -326,19 +326,24 @@ where
   let latest_entry = if next_position == 4 {
     None
   } else {
-    // 末尾のエントリを読み込み
-    back_to_safety(cursor, 4 /* offset */ + 8 /* checksum */, "The first entry is corrupted.")?;
+    // 末尾のデータを読み込み
+    back_to_safety(cursor, 4 /* offset */ + 8 /* checksum */, "The first data is corrupted.")?;
     let offset = cursor.read_u32::<LittleEndian>()?;
-    back_to_safety(cursor, offset + 4 /* offset */, "The last entry is corrupted.")?;
-    let entry = read_entry(cursor)?;
+    back_to_safety(cursor, offset + 4 /* offset */, "The last data is corrupted.")?;
+    let position = cursor.stream_position()?;
+    let data = read_data(cursor, position)?;
     if cursor.stream_position()? != next_position {
-      // 壊れたストレージから読み込んだ offset が、たまたまどこかの正しいエントリ境界を指していた場合、正しく
+      // 壊れたストレージから読み込んだ offset が、たまたまどこかの正しいデータ境界を指していた場合、正しく
       // 読み込めるが結果となる位置は末尾と一致しない。
-      let msg = "The last entry is corrupted.".to_string();
+      let msg = format!(
+        "The last data is corrupted; The data read from the position {} pointed to by the meta information {} was not the end.",
+        position,
+        next_position - (u32::BITS + u64::BITS) as u64 / 8
+      );
       return Err(DamagedStorage(msg));
     }
 
-    Some(entry)
+    Some(data)
   };
 
   Ok((latest_entry, next_position))
@@ -359,38 +364,18 @@ where
   }
 }
 
-/// 指定されたカーソルの現在の位置からエントリを読み込みます。
-/// 正常終了時のカーソルは次のエントリを指しています。
-fn read_entry<R>(r: &mut R) -> Result<Entry>
-where
-  R: Read + Seek,
-{
-  let position = r.stream_position()?;
-  let mut read = ChecksumRead::new(r);
-  let entry = Entry::read_from(&mut read, position)?;
-  println!("READ @{position}: {entry:?}");
-  read.check_delimiter()?;
-  Ok(entry)
-}
-
-/// 指定されたカーソルの現在の位置をエントリの先頭としてすべての `INode` を読み込みます。正常終了した場合、カーソル
-/// 位置は最後の `INode` を読み込んだ直後を指しています。
-fn read_inodes<R: Read + Seek>(r: &mut R) -> Result<(Index, Vec<INode>)> {
-  let position = r.stream_position()?;
-  Entry::read_inodes_from(r, position)
-}
-
-/// 指定されたカーソルにエントリを書き込みます。
-/// このエントリに対して書き込みが行われた長さを返します。
-fn write_entry<W: Write + Seek>(writer: &mut W, e: &Entry) -> Result<usize> {
-  debug_assert!(e.enode.payload.len() <= MAX_PAYLOAD_SIZE);
-  debug_assert!(e.inodes.len() <= 0xFF);
-
-  let position = writer.stream_position()?;
+/// 指定されたカーソルにデータを書き込みます。
+/// このデータに対して書き込みが行われた長さを返します。
+fn write_data<W: Write + Seek, S: Serializable>(writer: &mut W, e: &S) -> Result<usize> {
   let mut w = ChecksumWrite::new(writer);
-  let mut length = e.write_to(&mut w)?;
+  let mut length = e.write(&mut w)?;
   length += w.write_delimiter()?;
-
-  println!("WRITE @{}: {}; {length} bytes", position, e.enode.meta.address.i);
   Ok(length)
+}
+
+fn read_data<R: Read + Seek, S: Serializable>(reader: &mut R, position: Position) -> Result<S> {
+  let mut r = ChecksumRead::new(reader);
+  let data = S::read(&mut r, position)?;
+  r.check_delimiter()?;
+  Ok(data)
 }

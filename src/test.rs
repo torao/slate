@@ -18,7 +18,8 @@ fn test_multi_threaded_query() {
     for _ in 0..handles.capacity() {
       let cloned_db = db.clone();
       handles.push(spawn(move || {
-        let mut query = cloned_db.snapshot().query().unwrap();
+        let snapshot = cloned_db.snapshot();
+        let mut query = snapshot.query().unwrap();
         for i in 0..=N {
           if let Some(value) = query.get(i).unwrap() {
             assert!(i > 0 || i <= n);
@@ -45,7 +46,8 @@ fn test_bootstrap() {
   let storage = BlockStorage::from_buffer(buffer.clone(), false);
   let db = Slate::new(storage).unwrap();
   let content = buffer.read().unwrap();
-  let mut query = db.snapshot().query().unwrap();
+  let snapshot = db.snapshot();
+  let mut query = snapshot.query().unwrap();
   assert_eq!(None, db.root());
   assert_eq!(0, db.n());
   assert_eq!(None, db.root_hash());
@@ -77,7 +79,8 @@ fn test_bootstrap() {
   for (values, buffer) in samples {
     let storage = BlockStorage::from_buffer(Arc::new(RwLock::new(buffer)), false);
     let db = Slate::new(storage).unwrap();
-    let mut query = db.snapshot().query().unwrap();
+    let snapshot = db.snapshot();
+    let mut query = snapshot.query().unwrap();
     for (i, expected) in values.iter().enumerate() {
       println!("{}/{}: {expected:?}", i + 1, db.n());
       let actual = query.get(i as u64 + 1).unwrap().unwrap();
@@ -101,7 +104,8 @@ fn test_append_and_get() {
   const N: u64 = 100;
   for n in 1..=N {
     let db = prepare_db(n, PAYLOAD_SIZE);
-    let mut query = db.snapshot().query().unwrap();
+    let snapshot = db.snapshot();
+    let mut query = snapshot.query().unwrap();
 
     // 単一の葉ノードを参照
     for i in 0..n {
@@ -135,7 +139,7 @@ fn prepare_db(n: u64, payload_size: usize) -> Slate<BlockStorage<MemoryDevice>> 
 }
 
 /// 指定されたストレージが仕様に準拠していることを検証します。
-pub fn verify_storage_spec<S: Storage>(storage: &mut S) {
+pub fn verify_storage_spec<S: Storage<Entry>>(storage: &mut S) {
   // まだ書き込んでいない状態では末尾のエントリは存在しない
   let (entry, first_position) = storage.boot().unwrap();
   assert!(entry.is_none());
@@ -159,7 +163,7 @@ pub fn verify_storage_spec<S: Storage>(storage: &mut S) {
       let expected = build_entry(i, &value, &positions);
 
       let mut cursor = storage.reader().unwrap();
-      let entry = cursor.read_entry(position).unwrap();
+      let entry = cursor.read(position).unwrap();
       assert_eq!(i, entry.enode.meta.address.i);
       assert_eq!(0, entry.enode.meta.address.j);
       assert_eq!(position, entry.enode.meta.address.position);

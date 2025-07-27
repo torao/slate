@@ -1,5 +1,5 @@
-use crate::EntryReader;
-use crate::{Entry, Error, INDEX_SIZE, Index, Position, Result, Storage, serialize::read_entry_from};
+use crate::{Error, INDEX_SIZE, Index, Position, Result, Storage};
+use crate::{Reader, Serializable};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rocksdb::DB;
 use std::io::Cursor;
@@ -37,8 +37,8 @@ impl RocksDBStorage {
   }
 }
 
-impl Storage for RocksDBStorage {
-  fn boot(&mut self) -> Result<(Option<Entry>, Position)> {
+impl<S: Serializable> Storage<S> for RocksDBStorage {
+  fn boot(&mut self) -> Result<(Option<S>, Position)> {
     let guard = self.db.write()?;
     match guard.get(&self.key_for_position)? {
       Some(value) => {
@@ -46,8 +46,8 @@ impl Storage for RocksDBStorage {
         let key = self.key(position - 1);
         match guard.get(&key)? {
           Some(value) => {
-            let entry = read_entry_from(&mut Cursor::new(&value), position - 1)?;
-            Ok((Some(entry), position))
+            let data = S::read(&mut Cursor::new(&value), position - 1)?;
+            Ok((Some(data), position))
           }
           None => key_not_found(&key, position),
         }
@@ -56,11 +56,11 @@ impl Storage for RocksDBStorage {
     }
   }
 
-  fn put(&mut self, position: Position, entry: &Entry) -> Result<Position> {
+  fn put(&mut self, position: Position, entry: &S) -> Result<Position> {
     // エントリをバイト配列に変換
     let key = self.key(position);
     let mut value = Vec::with_capacity(1024);
-    entry.write_to(&mut Cursor::new(&mut value))?;
+    entry.write(&mut Cursor::new(&mut value))?;
 
     // 次の位置をバイト配列に変換
     let position_value = Self::position_to_value(position + 1);
@@ -74,8 +74,7 @@ impl Storage for RocksDBStorage {
 
     Ok(position + 1)
   }
-
-  fn reader(&self) -> Result<Box<dyn EntryReader>> {
+  fn reader(&self) -> Result<Box<dyn Reader<S>>> {
     let db = self.db.clone();
     let key_prefix = self.key_prefix.clone();
     let key_hashing = self.key_hashing;
@@ -89,21 +88,15 @@ struct RocksDBReader {
   key_hashing: bool,
 }
 
-impl EntryReader for RocksDBReader {
-  fn read_entry(&mut self, position: Position) -> Result<Entry> {
+impl<S: Serializable> Reader<S> for RocksDBReader {
+  fn read(&mut self, position: Position) -> Result<S> {
     let key = create_key(position, self.key_hashing, &self.key_prefix);
     let value = self.db.read()?.get(&key)?;
     if let Some(value) = value {
-      Ok(Entry::read_from(&mut Cursor::new(&value), position)?)
+      Ok(S::read(&mut Cursor::new(&value), position)?)
     } else {
       key_not_found(&key, position)
     }
-  }
-
-  fn read_inodes(&mut self, position: Position) -> Result<(Index, Vec<crate::INode>)> {
-    let Entry { enode, inodes } = self.read_entry(position)?;
-    let index = enode.meta.address.i;
-    Ok((index, inodes))
   }
 }
 

@@ -106,3 +106,9 @@ impl<'a, R: Read + Seek> Read for ChecksumRead<'a, R> {
     Ok(size)
   }
 }
+
+impl<'a, R: Read + Seek> Seek for ChecksumRead<'a, R> {
+  fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+    self.input.seek(pos)
+  }
+}

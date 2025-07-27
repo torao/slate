@@ -49,9 +49,9 @@
 use crate::error::Error;
 use crate::error::Error::*;
 use crate::model::{NthGenHashTree, ceil_log2, contains, subnodes};
-use crate::serialize::{read_entry_from, read_inodes_from, write_entry_to};
+use crate::serialize::{read_entry_from, read_inodes_from, write_entry_to, write_inodes_to};
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 
 pub(crate) mod checksum;
@@ -358,6 +358,30 @@ impl Entry {
   }
 }
 
+impl Serializable for Entry {
+  fn write<W: Write>(&self, w: &mut W) -> Result<usize> {
+    debug_assert!(self.enode.payload.len() <= MAX_PAYLOAD_SIZE);
+    debug_assert!(self.inodes.len() <= 0xFF);
+    self.write_to(w)
+  }
+
+  fn read<R: Read + Seek>(r: &mut R, position: Position) -> Result<Self> {
+    Self::read_from(r, position)
+  }
+}
+
+pub struct INodes(Index, Vec<INode>);
+
+impl Serializable for INodes {
+  fn write<W: Write>(&self, w: &mut W) -> Result<usize> {
+    write_inodes_to(self.0, &self.1, w)
+  }
+  fn read<R: Read + Seek>(r: &mut R, position: Position) -> Result<Self> {
+    let (index, inodes) = Entry::read_inodes_from(r, position)?;
+    Ok(INodes(index, inodes))
+  }
+}
+
 // --------------------------------------------------------------------------
 
 /// ペイロード (値) の最大バイトサイズを表す定数です。2GB (2,147,483,647 bytes) を表します。
@@ -430,12 +454,12 @@ impl Cache {
   }
 }
 
-pub struct Snapshot<'a, S: Storage> {
+pub struct Snapshot<'a, S: Storage<Entry>> {
   cache: Arc<Cache>,
   storage: &'a S,
 }
 
-impl<'a, S: Storage> Snapshot<'a, S> {
+impl<'a, S: Storage<Entry>> Snapshot<'a, S> {
   pub fn revision(&self) -> Index {
     self.cache.n()
   }
@@ -448,13 +472,13 @@ impl<'a, S: Storage> Snapshot<'a, S> {
 }
 
 /// ストレージ上に直列化された Stratified Hash Tree を表す木構造に対する操作を実装します。
-pub struct Slate<S: Storage> {
+pub struct Slate<S: Storage<Entry>> {
   position: Position,
   storage: S,
   latest_cache: Arc<Cache>,
 }
 
-impl<S: Storage> Slate<S> {
+impl<S: Storage<Entry>> Slate<S> {
   /// 指定された [`Storage`] に直列化されたハッシュ木を保存する Slate を構築します。
   ///
   /// ストレージに [`std::path::Path`] や [`std::path::PathBuf`] のようなパスを指定したするとそのファイルに
@@ -513,7 +537,7 @@ impl<S: Storage> Slate<S> {
     &self.storage
   }
 
-  fn boot(storage: &mut dyn Storage) -> Result<(Cache, Position)> {
+  fn boot(storage: &mut S) -> Result<(Cache, Position)> {
     let (latest_entry, position) = storage.boot()?;
     let cache = match latest_entry {
       Some(entry) => {
@@ -618,7 +642,7 @@ pub struct AuthPath {
 }
 
 pub struct Query {
-  cursor: Box<dyn EntryReader>,
+  cursor: Box<dyn Reader<Entry>>,
   revision: Arc<Cache>,
 }
 
@@ -732,11 +756,11 @@ impl Query {
 }
 
 fn read_entry_with_index_check(
-  r: &mut Box<dyn EntryReader>,
+  r: &mut Box<dyn Reader<Entry>>,
   position: Position,
   expected_index: Index,
 ) -> Result<Entry> {
-  let entry = r.read_entry(position)?;
+  let entry = r.read(position)?;
   let actual_index = entry.enode.meta.address.i;
   if actual_index != expected_index {
     Err(InternalStateInconsistency {

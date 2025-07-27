@@ -1,8 +1,8 @@
 use crate::checksum::hasher;
 use crate::model::NthGenHashTree;
-use crate::storage::{read_entry, read_inodes, write_entry};
+use crate::storage::{read_data, write_data};
 use crate::test::{random_payload, temp_file, verify_storage_spec};
-use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, Index, MetaInfo, Result};
+use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, INodes, Index, MetaInfo, Result, Serializable};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::remove_file;
 use std::hash::Hasher;
@@ -15,7 +15,7 @@ fn entry_serialization() -> Result<()> {
   for entry in sample_entries() {
     // メモリ上に書き込みを行いサイズを確認
     let mut buffer = Vec::new();
-    let written_length = write_entry(&mut Cursor::new(&mut buffer), &entry)?;
+    let written_length = write_data(&mut Cursor::new(&mut buffer), &entry)?;
     assert_eq!(written_length, buffer.len());
 
     // バッファの末尾に u64 で書き込まれたチェックサムが存在することを確認
@@ -25,13 +25,13 @@ fn entry_serialization() -> Result<()> {
 
     // 中間ノードのみを読み出して同一かを確認
     let mut cursor = io::Cursor::new(buffer.clone());
-    let (index, inodes) = read_inodes(&mut cursor)?;
+    let INodes(index, inodes) = INodes::read(&mut cursor, 0)?;
     assert_eq!(expected.enode.meta.address.i, index);
     assert_eq!(expected.inodes, inodes);
 
     // エントリ全体を読み出して同一かを確認
     cursor.set_position(0);
-    let actual = read_entry(&mut cursor)?;
+    let actual = Entry::read(&mut cursor, 0)?;
     assert_eq!(expected, actual);
   }
   Ok(())
@@ -44,11 +44,11 @@ fn garbled_at_any_position() -> Result<()> {
   for entry in sample_entries() {
     // 正しく書き込まれたバイナリを取得
     let mut buffer = Vec::new();
-    let write_length = write_entry(&mut Cursor::new(&mut buffer), &entry)?;
+    let write_length = write_data(&mut Cursor::new(&mut buffer), &entry)?;
     assert_eq!(write_length, buffer.len());
 
     let mut cursor = io::Cursor::new(buffer.clone());
-    assert_eq!(entry, read_entry(&mut cursor)?);
+    assert_eq!(entry, Entry::read(&mut cursor, 0)?);
 
     for position in 0u64..buffer.len() as u64 {
       // データ破損の設定
@@ -60,7 +60,7 @@ fn garbled_at_any_position() -> Result<()> {
       // データ破損に対して read_entry() でエラーが発生することを検証
       // TODO 最終的に、どのフィールドのバイト値が破損したかを識別して想定したエラーが検知されていることを確認する
       cursor.seek(SeekFrom::Start(0))?;
-      let result = read_entry(&mut cursor);
+      let result = read_data::<_, Entry>(&mut cursor, 0);
       assert!(result.is_err(), "{result:?}");
 
       // 破損したデータをもとに戻す

@@ -41,15 +41,13 @@ pub fn read_entry_from<R: Read>(r: &mut R, position: Position) -> Result<Entry> 
   Ok(Entry { enode, inodes })
 }
 
-pub fn write_entry_to<W: Write>(entry: &Entry, w: &mut W) -> Result<usize> {
-  debug_assert!(entry.enode.payload.len() <= MAX_PAYLOAD_SIZE);
-  debug_assert!(entry.inodes.len() <= 0xFF);
+pub fn write_inodes_to<W: Write>(index: Index, inodes: &[INode], w: &mut W) -> Result<usize> {
+  debug_assert!(inodes.len() <= 0xFF);
 
-  // 中間ノードの書き込み
   let mut length = (u64::BITS + u8::BITS) as usize / 8;
-  w.write_u64::<LittleEndian>(entry.enode.meta.address.i)?;
-  w.write_u8(entry.inodes.len() as u8)?;
-  for i in entry.inodes.iter() {
+  w.write_u64::<LittleEndian>(index)?;
+  w.write_u8(inodes.len() as u8)?;
+  for i in inodes.iter() {
     debug_assert_eq!((i.meta.address.j - 1) & (INDEX_SIZE - 1), i.meta.address.j - 1);
     debug_assert_eq!(Hash::SIZE, i.meta.hash.value.len());
     length += (u8::BITS + u64::BITS + u64::BITS + u8::BITS) as usize / 8 + i.meta.hash.value.len();
@@ -59,6 +57,14 @@ pub fn write_entry_to<W: Write>(entry: &Entry, w: &mut W) -> Result<usize> {
     w.write_u8(i.left.j)?;
     w.write_all(&i.meta.hash.value)?;
   }
+  Ok(length)
+}
+
+pub fn write_entry_to<W: Write>(entry: &Entry, w: &mut W) -> Result<usize> {
+  debug_assert!(entry.enode.payload.len() <= MAX_PAYLOAD_SIZE);
+
+  // 中間ノードの書き込み
+  let mut length = write_inodes_to(entry.enode.meta.address.i, &entry.inodes, w)?;
 
   // 葉ノードの書き込み
   length += u32::BITS as usize / 8 + entry.enode.payload.len() + entry.enode.meta.hash.value.len();
