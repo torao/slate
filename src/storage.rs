@@ -4,7 +4,7 @@ use crate::error::Error;
 use crate::error::Error::*;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LockResult, RwLock};
 
@@ -53,10 +53,8 @@ impl<B: BlockDevice, S: Serializable> Reader<S> for B {
   fn read(&mut self, position: Position) -> Result<S> {
     self.seek(SeekFrom::Start(position))?;
 
-    let mut read = ChecksumRead::new(self);
-    let data = S::read(&mut read, position)?;
-    read.check_delimiter()?;
-    Ok(data)
+    let mut br = BufReader::new(self);
+    read_data(&mut br, position)
   }
 }
 
@@ -116,8 +114,9 @@ impl<B: BlockDevice + 'static, S: Serializable> Storage<S> for BlockStorage<B> {
 
   fn put(&mut self, position: Position, data: &S) -> Result<Position> {
     debug_assert_eq!(self.position, position);
-    let length = write_data(&mut self.device, data)?;
-    self.device.flush()?;
+    let mut bw = BufWriter::new(&mut self.device);
+    let length = write_data(&mut bw, data)?;
+    bw.flush()?;
     self.position += length as u64;
     Ok(self.position)
   }

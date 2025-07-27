@@ -71,5 +71,6 @@ pub fn write_entry_to<W: Write>(entry: &Entry, w: &mut W) -> Result<usize> {
   w.write_u32::<LittleEndian>(entry.enode.payload.len() as u32)?;
   w.write_all(&entry.enode.payload)?;
   w.write_all(&entry.enode.meta.hash.value)?;
+  w.flush()?;
   Ok(length)
 }

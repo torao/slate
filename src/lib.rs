@@ -344,29 +344,17 @@ impl Entry {
     debug_assert!(inodes.iter().map(|i| i.meta.address.j).collect::<Vec<_>>().windows(2).all(|w| w[0] < w[1]));
     Entry { enode, inodes }
   }
-
-  pub fn read_inodes_from<R: Read>(r: &mut R, position: Position) -> Result<(Index, Vec<INode>)> {
-    read_inodes_from(r, position)
-  }
-
-  pub fn read_from<R: Read>(r: &mut R, position: Position) -> Result<Entry> {
-    read_entry_from(r, position)
-  }
-
-  pub fn write_to<W: Write>(&self, w: &mut W) -> Result<usize> {
-    write_entry_to(self, w)
-  }
 }
 
 impl Serializable for Entry {
   fn write<W: Write>(&self, w: &mut W) -> Result<usize> {
     debug_assert!(self.enode.payload.len() <= MAX_PAYLOAD_SIZE);
     debug_assert!(self.inodes.len() <= 0xFF);
-    self.write_to(w)
+    write_entry_to(self, w)
   }
 
   fn read<R: Read + Seek>(r: &mut R, position: Position) -> Result<Self> {
-    Self::read_from(r, position)
+    read_entry_from(r, position)
   }
 }
 
@@ -377,7 +365,7 @@ impl Serializable for INodes {
     write_inodes_to(self.0, &self.1, w)
   }
   fn read<R: Read + Seek>(r: &mut R, position: Position) -> Result<Self> {
-    let (index, inodes) = Entry::read_inodes_from(r, position)?;
+    let (index, inodes) = read_inodes_from(r, position)?;
     Ok(INodes(index, inodes))
   }
 }
@@ -724,13 +712,11 @@ impl Query {
         if b_j == 0 {
           if let Some(v) = leaf_value {
             value = Some(v.to_vec());
-            println!("{_n}: i={i} = b_i={b_i}, b_j={b_j} == 0: Stop");
             Ok(WalkDirection::Stop)
           } else {
             inconsistency(format!("The value was not passed at the leaf node b_{b_i} reached"))
           }
         } else {
-          println!("{_n}: i={i} = b_i={b_i}, b_j={b_j} != 0: Right");
           Ok(WalkDirection::Right)
         }
       } else {
