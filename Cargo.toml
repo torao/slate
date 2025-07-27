@@ -15,12 +15,13 @@ highway = "1"
 sha2 = "0.10"
 clap = "4"
 rocksdb = { version = "0.23", optional = true }
+blake3 = { version = "1.8", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
 
 [features]
-default = ["sha256", "panic_over_inconsistency"]
+default = ["blake3", "panic_over_inconsistency"]
 rocksdb = ["dep:rocksdb"]
 highwayhash64 = []
 sha224 = []
@@ -28,6 +29,7 @@ sha256 = []
 sha512 = []
 sha512_224 = []
 sha512_256 = []
+blake3 = ["dep:blake3"]
 panic_over_inconsistency = []
 small_index = []
 

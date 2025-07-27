@@ -219,19 +219,28 @@ impl Hash {
   #[cfg(feature = "sha512")]
   pub const SIZE: usize = 64;
 
+  #[cfg(feature = "blake3")]
+  pub const SIZE: usize = blake3::OUT_LEN;
+
   pub fn new(hash: [u8; Self::SIZE]) -> Hash {
     Hash { value: hash }
   }
 
   /// 指定された値をハッシュ化します。
   pub fn from_bytes(value: &[u8]) -> Hash {
-    #[cfg(feature = "highwayhash64")]
+    #[cfg(feature = "blake3")]
+    {
+      let mut hash = [0u8; Hash::SIZE];
+      (&mut hash[..]).write_all(blake3::hash(value).as_bytes()).unwrap();
+      Hash::new(hash)
+    }
+    #[cfg(all(not(feature = "blake3"), feature = "highwayhash64"))]
     {
       let mut builder = HighwayBuilder::default();
       builder.write_all(value).unwrap();
       Hash::new(builder.finalize64().to_le_bytes())
     }
-    #[cfg(not(feature = "highwayhash64"))]
+    #[cfg(all(not(feature = "blake3"), not(feature = "highwayhash64")))]
     {
       use sha2::Digest;
       #[cfg(feature = "sha256")]
@@ -497,7 +506,7 @@ impl<S: Storage<Entry>> Slate<S> {
   /// remove_file(path.as_path()).unwrap();
   /// ```
   pub fn new(mut storage: S) -> Result<Slate<S>> {
-    let (cache, position) = Self::boot(&mut storage)?;
+    let (cache, position) = Self::load_metadata(&mut storage)?;
     Ok(Slate { position, storage, latest_cache: Arc::new(cache) })
   }
 
@@ -525,7 +534,7 @@ impl<S: Storage<Entry>> Slate<S> {
     &self.storage
   }
 
-  fn boot(storage: &mut S) -> Result<(Cache, Position)> {
+  fn load_metadata(storage: &mut S) -> Result<(Cache, Position)> {
     let (latest_entry, position) = storage.boot()?;
     let cache = match latest_entry {
       Some(entry) => {
