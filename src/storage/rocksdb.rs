@@ -2,7 +2,7 @@ use crate::{Error, INDEX_SIZE, Index, Position, Result, Storage};
 use crate::{Reader, Serializable};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rocksdb::DB;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::sync::{Arc, RwLock};
 
 #[cfg(test)]
@@ -12,24 +12,14 @@ pub struct RocksDBStorage {
   db: Arc<RwLock<DB>>,
   key_prefix: Vec<u8>,
   key_hashing: bool,
-  key_for_position: Vec<u8>,
+  key_for_metadata: Vec<u8>,
 }
 
 impl RocksDBStorage {
   pub fn new(db: Arc<RwLock<DB>>, key_prefix: &[u8], key_hashing: bool) -> Self {
     let key_prefix = key_prefix.to_vec();
-    let key_for_position = create_key(0, key_hashing, &key_prefix);
-    Self { db, key_prefix, key_hashing, key_for_position }
-  }
-
-  fn position_to_value(position: Position) -> Vec<u8> {
-    let mut value = Vec::with_capacity(u64::BITS as usize / 8);
-    Cursor::new(&mut value).write_u64::<LittleEndian>(position).unwrap();
-    value
-  }
-
-  fn value_to_position(value: &[u8]) -> Result<Position> {
-    Ok(Cursor::new(&value).read_u64::<LittleEndian>()?)
+    let key_for_metadata = create_key(0, key_hashing, &key_prefix);
+    Self { db, key_prefix, key_hashing, key_for_metadata }
   }
 
   fn key(&self, i: Index) -> Vec<u8> {
@@ -37,22 +27,23 @@ impl RocksDBStorage {
   }
 }
 
-impl<S: Serializable> Storage<S> for RocksDBStorage {
-  fn boot(&mut self) -> Result<(Option<S>, Position)> {
+impl<S: Serializable, const M: usize> Storage<S, M> for RocksDBStorage {
+  fn boot(&mut self) -> Result<(Option<S>, Position, Vec<u8>)> {
     let guard = self.db.write()?;
-    match guard.get(&self.key_for_position)? {
+    match guard.get(&self.key_for_metadata)? {
       Some(value) => {
-        let position = Self::value_to_position(&value)?;
+        let position = Cursor::new(&value[..8]).read_u64::<LittleEndian>()?;
+        let metadata = value[8..].to_vec();
         let key = self.key(position - 1);
         match guard.get(&key)? {
           Some(value) => {
             let data = S::read(&mut Cursor::new(&value), position - 1)?;
-            Ok((Some(data), position))
+            Ok((Some(data), position, metadata))
           }
           None => key_not_found(&key, position),
         }
       }
-      None => Ok((None, 1)),
+      None => Ok((None, 1, vec![0u8; M])),
     }
   }
 
@@ -62,14 +53,22 @@ impl<S: Serializable> Storage<S> for RocksDBStorage {
     let mut value = Vec::with_capacity(1024);
     entry.write(&mut Cursor::new(&mut value))?;
 
-    // 次の位置をバイト配列に変換
-    let position_value = Self::position_to_value(position + 1);
-
-    // 値の保存
     {
+      // 値の保存
       let guard = self.db.write()?;
       guard.put(key, value)?;
-      guard.put(&self.key_for_position, position_value)?;
+
+      // メタデータの保存
+      let meatadata = match guard.get(&self.key_for_metadata)? {
+        Some(mut value) => {
+          Cursor::new(&mut value).write_u64::<LittleEndian>(position + 1)?;
+          value
+        }
+        None => {
+          vec![0u8; M + 8]
+        }
+      };
+      guard.put(&self.key_for_metadata, meatadata)?;
     }
 
     Ok(position + 1)
@@ -79,6 +78,20 @@ impl<S: Serializable> Storage<S> for RocksDBStorage {
     let key_prefix = self.key_prefix.clone();
     let key_hashing = self.key_hashing;
     Ok(Box::new(RocksDBReader { db, key_prefix, key_hashing }))
+  }
+  fn flush_metadata(&mut self, metadata: &[u8]) -> Result<()> {
+    let guard = self.db.write()?;
+    let value = match guard.get(&self.key_for_metadata)? {
+      Some(mut value) => {
+        Cursor::new(&mut value[8..]).write_all(metadata)?;
+        value
+      }
+      None => {
+        vec![0u8; M + 8]
+      }
+    };
+    guard.put(&self.key_for_metadata, value)?;
+    Ok(())
   }
 }
 

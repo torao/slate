@@ -139,9 +139,9 @@ fn prepare_db(n: u64, payload_size: usize) -> Slate<BlockStorage<MemoryDevice>> 
 }
 
 /// 指定されたストレージが仕様に準拠していることを検証します。
-pub fn verify_storage_spec<S: Storage<Entry>>(storage: &mut S) {
+pub fn verify_storage_spec<S: Storage<Entry, 0>>(storage: &mut S) {
   // まだ書き込んでいない状態では末尾のエントリは存在しない
-  let (entry, first_position) = storage.boot().unwrap();
+  let (entry, first_position, _) = storage.boot().unwrap();
   assert!(entry.is_none());
 
   // 書き込みと読み込みを相互に実行

@@ -451,12 +451,12 @@ impl Cache {
   }
 }
 
-pub struct Snapshot<'a, S: Storage<Entry>> {
+pub struct Snapshot<'a, S: Storage<Entry, 0>> {
   cache: Arc<Cache>,
   storage: &'a S,
 }
 
-impl<'a, S: Storage<Entry>> Snapshot<'a, S> {
+impl<'a, S: Storage<Entry, 0>> Snapshot<'a, S> {
   pub fn revision(&self) -> Index {
     self.cache.n()
   }
@@ -469,13 +469,13 @@ impl<'a, S: Storage<Entry>> Snapshot<'a, S> {
 }
 
 /// ストレージ上に直列化された Stratified Hash Tree を表す木構造に対する操作を実装します。
-pub struct Slate<S: Storage<Entry>> {
+pub struct Slate<S: Storage<Entry, 0>> {
   position: Position,
   storage: S,
   latest_cache: Arc<Cache>,
 }
 
-impl<S: Storage<Entry>> Slate<S> {
+impl<S: Storage<Entry, 0>> Slate<S> {
   /// 指定された [`Storage`] に直列化されたハッシュ木を保存する Slate を構築します。
   ///
   /// ストレージに [`std::path::Path`] や [`std::path::PathBuf`] のようなパスを指定したするとそのファイルに
@@ -535,7 +535,7 @@ impl<S: Storage<Entry>> Slate<S> {
   }
 
   fn load_metadata(storage: &mut S) -> Result<(Cache, Position)> {
-    let (latest_entry, position) = storage.boot()?;
+    let (latest_entry, position, _) = storage.boot()?;
     let cache = match latest_entry {
       Some(entry) => {
         // PBST ルートノードの読み込み
