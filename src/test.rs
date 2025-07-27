@@ -6,6 +6,7 @@ use std::path::{MAIN_SEPARATOR, PathBuf};
 use std::sync::RwLock;
 use std::thread::{JoinHandle, spawn};
 
+use crate::memory::MemoryDevice;
 use crate::model::ceil_log2;
 use crate::*;
 
