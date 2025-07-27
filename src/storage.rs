@@ -308,14 +308,14 @@ where
       cursor.write_u8(STORAGE_VERSION)?;
       cursor.flush()?;
     }
-    1..=3 => return Err(FileIsNotContentsOfLMTHTree { message: "bad magic number" }),
+    1..=3 => return Err(StorageisNotForSlate { message: "bad magic number" }),
     _ => {
       // マジックナンバーの確認
       let mut buffer = [0u8; 4];
       cursor.seek(SeekFrom::Start(0))?;
       cursor.read_exact(&mut buffer)?;
       if buffer[..3] != STORAGE_IDENTIFIER[..] {
-        return Err(FileIsNotContentsOfLMTHTree { message: "bad magic number" });
+        return Err(StorageisNotForSlate { message: "bad magic number" });
       } else if !is_version_compatible(buffer[3]) {
         return Err(IncompatibleVersion(buffer[3] >> 4, buffer[3] & 0x0F));
       }
