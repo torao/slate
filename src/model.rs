@@ -72,13 +72,13 @@ pub struct Path {
 /// アルゴリズムを実装します。
 ///
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub struct NthGenHashTree {
+pub struct Generation {
   n: Index,
   pbst_roots: Vec<Node>,
   ephemeral_nodes: Vec<INode>,
 }
 
-impl NthGenHashTree {
+impl Generation {
   /// 木構造 𝑇ₙ に含まれる独立した完全二分木のルートノードとそれらを接続する中間ノードを算出します。この列は木構造の
   /// 左に存在する完全二分木が先に来るように配置されています。
   /// 時間/空間計算量は O(log n) です。

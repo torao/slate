@@ -1,5 +1,5 @@
 use crate::checksum::hasher;
-use crate::model::NthGenHashTree;
+use crate::model::Generation;
 use crate::storage::{read_data, write_data};
 use crate::test::{random_payload, temp_file, verify_storage_spec};
 use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, INodes, Index, MetaInfo, Result, Serializable};
@@ -118,7 +118,7 @@ fn sample_entries() -> Vec<Entry> {
 
 fn create_sample_entry(i: Index, payload: Vec<u8>) -> Entry {
   let position = 0;
-  let model = NthGenHashTree::new(i);
+  let model = Generation::new(i);
   let enode = ENode {
     meta: MetaInfo { address: Address { i, j: 0, position }, hash: Hash::new([0; crate::Hash::SIZE]) },
     payload,

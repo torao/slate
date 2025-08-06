@@ -48,7 +48,7 @@
 //!
 use crate::error::Error;
 use crate::error::Error::*;
-use crate::model::{NthGenHashTree, ceil_log2, contains, subnodes};
+use crate::model::{Generation, ceil_log2, contains, subnodes};
 use crate::serialize::{read_entry_from, read_inodes_from, write_entry_to, write_inodes_to};
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Seek, Write};
@@ -393,16 +393,16 @@ pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
 struct CacheInner {
   last_entry: Entry,
   pbst_roots: Vec<PbstRoot>,
-  model: NthGenHashTree,
+  generation: Generation,
 }
 
 #[derive(PartialEq, Eq, Debug)]
 struct Cache(Option<CacheInner>);
 
 impl Cache {
-  pub fn new(last_entry: Entry, pbst_roots: Vec<PbstRoot>, model: NthGenHashTree) -> Self {
-    debug_assert_eq!(model.n(), last_entry.enode.meta.address.i);
-    Cache(Some(CacheInner { last_entry, pbst_roots, model }))
+  pub fn new(last_entry: Entry, pbst_roots: Vec<PbstRoot>, generation: Generation) -> Self {
+    debug_assert_eq!(generation.n(), last_entry.enode.meta.address.i);
+    Cache(Some(CacheInner { last_entry, pbst_roots, generation }))
   }
 
   pub fn empty() -> Self {
@@ -549,8 +549,8 @@ impl<S: Storage<Entry, 0>> Slate<S> {
           let pbst_root = inodes.pop().map(PbstRoot::INode).unwrap_or(PbstRoot::ENode(enode));
           pbst_roots.push(pbst_root);
         }
-        let model = NthGenHashTree::new(entry.enode.meta.address.i);
-        Cache::new(entry, pbst_roots, model)
+        let generation = Generation::new(entry.enode.meta.address.i);
+        Cache::new(entry, pbst_roots, generation)
       }
       None => Cache::empty(),
     };
@@ -578,7 +578,7 @@ impl<S: Storage<Entry, 0>> Slate<S> {
     // 中間ノードとその左枝にある PBST ルートの構築
     let mut inodes = Vec::<INode>::with_capacity(INDEX_SIZE as usize);
     let mut right_hash = enode.meta.hash;
-    let generation = NthGenHashTree::new(i);
+    let generation = Generation::new(i);
     let right_to_left_inodes = generation.inodes();
     let mut pbst_roots = Vec::with_capacity(ceil_log2(i) as usize);
     for n in right_to_left_inodes.iter() {
@@ -613,7 +613,7 @@ impl<S: Storage<Entry, 0>> Slate<S> {
     self.position = self.storage.put(self.position, &entry)?;
 
     // キャッシュを更新
-    let cache = Cache(Some(CacheInner { last_entry: entry, pbst_roots, model: generation }));
+    let cache = Cache(Some(CacheInner { last_entry: entry, pbst_roots, generation }));
     self.latest_cache = Arc::new(cache);
 
     Ok(Node::new(i, j, root_hash))

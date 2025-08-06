@@ -1,12 +1,12 @@
 use std::iter::FromIterator;
 
 use crate::Index;
-use crate::model::{Node, NthGenHashTree, Path, Step, ceil_log2, floor_log2};
+use crate::model::{Generation, Node, Path, Step, ceil_log2, floor_log2};
 
 #[test]
 #[should_panic]
 fn test_generation_new_with_zero() {
-  NthGenHashTree::new(0);
+  Generation::new(0);
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn test_generation() {
     post_pbt(33),
     pre_pbt(64),
   ] {
-    let generation = NthGenHashTree::new(n);
+    let generation = Generation::new(n);
     assert_eq!(n, generation.n());
 
     // 一過性の中間ノード
@@ -90,8 +90,8 @@ fn test_generation() {
 #[test]
 fn test_generation_root() {
   for (n, expected) in ns().map(|i| (i, (i, ceil_log2(i)))) {
-    let Node { i, j } = NthGenHashTree::new(n).root();
-    assert_eq!(expected, (i, j), "{:?}", NthGenHashTree::new(n));
+    let Node { i, j } = Generation::new(n).root();
+    assert_eq!(expected, (i, j), "{:?}", Generation::new(n));
   }
 }
 
@@ -116,14 +116,14 @@ fn test_generation_path_to() {
   ];
   cases.append(ns().map(|i| (i, (i, ceil_log2(i)), path(i, vec![]))).collect::<Vec<(u64, (u64, u8), Path)>>().as_mut());
   for (n, (i, j), expected) in cases {
-    let generation = NthGenHashTree::new(n);
+    let generation = Generation::new(n);
     let actual = generation.path_to(i, j).unwrap();
     assert_eq!(expected, actual)
   }
 
   // 範囲外の中間ノードを指定した場合
   for (n, j) in [(1, 1), (1, 2), (2, 2), (3, 3), (4, 3)] {
-    let generation = NthGenHashTree::new(n);
+    let generation = Generation::new(n);
     assert_eq!(None, generation.path_to(n, j));
   }
 
@@ -146,7 +146,7 @@ fn test_generation_path_to() {
     (14, 2),
     (15, 1),
   ] {
-    let generation = NthGenHashTree::new(n);
+    let generation = Generation::new(n);
     assert_eq!(None, generation.path_to(n, j));
   }
 }

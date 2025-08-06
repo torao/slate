@@ -178,7 +178,7 @@ pub fn verify_storage_spec<S: Storage<Entry, 0>>(storage: &mut S) {
 
 fn build_entry(i: Index, value: &[u8], positions: &[Index]) -> Entry {
   let position = positions[i as usize - 1];
-  let model = NthGenHashTree::new(i);
+  let model = Generation::new(i);
   let enode =
     ENode { meta: MetaInfo::new(Address::new(i, 0, position), Hash::from_bytes(value)), payload: value.to_vec() };
   let inodes = model
