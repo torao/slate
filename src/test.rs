@@ -6,8 +6,8 @@ use std::path::{MAIN_SEPARATOR, PathBuf};
 use std::sync::RwLock;
 use std::thread::{JoinHandle, spawn};
 
+use crate::formula::ceil_log2;
 use crate::memory::MemoryDevice;
-use crate::model::ceil_log2;
 use crate::*;
 
 #[test]
@@ -51,7 +51,6 @@ fn test_bootstrap() {
   let mut query = snapshot.query().unwrap();
   assert_eq!(None, db.root());
   assert_eq!(0, db.n());
-  assert_eq!(None, db.root_hash());
   assert_eq!(0, query.revision());
   assert_eq!(None, query.get(1).unwrap());
   assert_eq!(4, content.len());
@@ -89,8 +88,8 @@ fn test_bootstrap() {
     }
     match db.root() {
       Some(root) => {
-        assert_eq!(values.len() as Index, root.i);
-        assert_eq!(ceil_log2(values.len() as Index), root.j);
+        assert_eq!(values.len() as Index, root.address.i);
+        assert_eq!(ceil_log2(values.len() as Index), root.address.j);
       }
       None => assert!(values.is_empty()),
     }
@@ -101,7 +100,7 @@ const PAYLOAD_SIZE: usize = 4;
 
 /// データを追加して取得します。
 #[test]
-fn test_append_and_get() {
+fn append_and_get() {
   const N: u64 = 100;
   for n in 1..=N {
     let db = prepare_db(n, PAYLOAD_SIZE);
@@ -132,17 +131,17 @@ fn prepare_db(n: u64, payload_size: usize) -> Slate<BlockStorage<MemoryDevice>> 
     let value = random_payload(payload_size, i + 1);
     let root = db.append(value.as_slice()).expect("append() failed");
     // dump(&mut db);
-    assert_eq!(db.root().unwrap(), root);
-    assert_eq!(i + 1, root.i);
-    assert_eq!(ceil_log2(i + 1), root.j);
+    assert_eq!(db.root().cloned().unwrap(), root, "n={n}, i={i}");
+    assert_eq!(i + 1, root.address.i);
+    assert_eq!(ceil_log2(i + 1), root.address.j);
   }
   db
 }
 
 /// 指定されたストレージが仕様に準拠していることを検証します。
-pub fn verify_storage_spec<S: Storage<Entry, 0>>(storage: &mut S) {
+pub fn verify_storage_spec<S: Storage<Entry>>(storage: &mut S) {
   // まだ書き込んでいない状態では末尾のエントリは存在しない
-  let (entry, first_position, _) = storage.boot().unwrap();
+  let (entry, first_position) = storage.boot().unwrap();
   assert!(entry.is_none());
 
   // 書き込みと読み込みを相互に実行
@@ -178,7 +177,7 @@ pub fn verify_storage_spec<S: Storage<Entry, 0>>(storage: &mut S) {
 
 fn build_entry(i: Index, value: &[u8], positions: &[Index]) -> Entry {
   let position = positions[i as usize - 1];
-  let model = Generation::new(i);
+  let model = Model::new(i);
   let enode =
     ENode { meta: MetaInfo::new(Address::new(i, 0, position), Hash::from_bytes(value)), payload: value.to_vec() };
   let inodes = model

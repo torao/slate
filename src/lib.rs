@@ -21,8 +21,8 @@
 //! let first = "first".as_bytes();
 //! let root = db.append(first).unwrap();
 //! let mut query = db.snapshot().query().unwrap();
-//! assert_eq!(1, root.i);
-//! assert_eq!(first, query.get(root.i).unwrap().unwrap());
+//! assert_eq!(1, root.address.i);
+//! assert_eq!(first, query.get(root.address.i).unwrap().unwrap());
 //! assert_eq!(None, query.get(2).unwrap());
 //!
 //! // Similar to the typical hash tree, you can refer to a verifiable value using root hash.
@@ -46,21 +46,24 @@
 //! //assert_eq!(Node::new(3, 2, root.hash), values.root());
 //! ```
 //!
+use crate::cache::Cache;
 use crate::error::Error;
 use crate::error::Error::*;
-use crate::model::{Generation, ceil_log2, contains, subnodes};
+use crate::formula::{Model, contains, subnodes_of};
 use crate::serialize::{read_entry_from, read_inodes_from, write_entry_to, write_inodes_to};
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Seek, Write};
 use std::sync::Arc;
 
+pub mod cache;
 pub(crate) mod checksum;
 pub mod error;
+pub mod formula;
 pub mod inspect;
-pub mod model;
-mod storage;
-pub use storage::*;
 mod serialize;
+mod storage;
+
+pub use storage::*;
 
 #[cfg(test)]
 pub mod test;
@@ -73,13 +76,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
 /// ことができます。
 ///
-pub type Index = model::Index;
+pub type Index = formula::Index;
 
 /// [`Index`] 型のビット幅を表す定数です。64 を表しています。
 ///
 /// コンパイル時に `small_index` feature を指定することでこの定数は 32 となります。
 ///
-pub const INDEX_SIZE: u8 = model::INDEX_SIZE;
+pub const INDEX_SIZE: u8 = formula::INDEX_SIZE;
 
 /// ハッシュ木を構成するノードを表します。
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
@@ -336,13 +339,7 @@ impl ENode {
   }
 }
 
-#[derive(Eq, PartialEq, Debug)]
-enum PbstRoot {
-  INode(INode),
-  ENode(ENode),
-}
-
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Entry {
   enode: ENode,
   inodes: Vec<INode>,
@@ -352,6 +349,18 @@ impl Entry {
   pub fn new(enode: ENode, inodes: Vec<INode>) -> Self {
     debug_assert!(inodes.iter().map(|i| i.meta.address.j).collect::<Vec<_>>().windows(2).all(|w| w[0] < w[1]));
     Entry { enode, inodes }
+  }
+
+  pub fn root(&self) -> MetaInfo {
+    if let Some(root) = self.inodes.last() { root.meta } else { self.enode.meta }
+  }
+
+  pub fn inode(&self, j: u8) -> Option<&INode> {
+    self.inodes.iter().find(|inode| inode.meta.address.j == j)
+  }
+
+  pub fn meta(&self, j: u8) -> Option<&MetaInfo> {
+    if j == 0 { Some(&self.enode.meta) } else { self.inode(j).map(|i| &i.meta) }
   }
 }
 
@@ -389,93 +398,31 @@ impl Serializable for INodes {
 ///
 pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
 
-#[derive(PartialEq, Eq, Debug)]
-struct CacheInner {
-  last_entry: Entry,
-  pbst_roots: Vec<PbstRoot>,
-  generation: Generation,
-}
-
-#[derive(PartialEq, Eq, Debug)]
-struct Cache(Option<CacheInner>);
-
-impl Cache {
-  pub fn new(last_entry: Entry, pbst_roots: Vec<PbstRoot>, generation: Generation) -> Self {
-    debug_assert_eq!(generation.n(), last_entry.enode.meta.address.i);
-    Cache(Some(CacheInner { last_entry, pbst_roots, generation }))
-  }
-
-  pub fn empty() -> Self {
-    Cache(None)
-  }
-
-  fn last_entry(&self) -> Option<&Entry> {
-    if let Some(CacheInner { last_entry, .. }) = &self.0 { Some(last_entry) } else { None }
-  }
-
-  fn root(&self) -> Option<Node> {
-    self
-      .last_entry()
-      .map(|e| e.inodes.last().map(|i| &i.meta).unwrap_or(&e.enode.meta))
-      .map(|root| Node::new(root.address.i, root.address.j, root.hash))
-  }
-
-  fn n(&self) -> Index {
-    self.last_entry().map(|e| e.enode.meta.address.i).unwrap_or(0)
-  }
-
-  fn get_pbst_root(&self, i: Index, j: u8) -> PbstRoot {
-    if let Some(cache) = &self.0 {
-      for node in cache.pbst_roots.iter() {
-        match &node {
-          PbstRoot::ENode(enode) if enode.meta.address.i == i && enode.meta.address.j == j => {
-            return PbstRoot::ENode(enode.clone());
-          }
-          PbstRoot::INode(inode) if inode.meta.address.i == i && inode.meta.address.j == j => {
-            return PbstRoot::INode(*inode);
-          }
-          _ => (),
-        }
-      }
-      for node in cache.last_entry.inodes.iter() {
-        if node.meta.address.i == i && node.meta.address.j == j {
-          return PbstRoot::INode(*node);
-        }
-      }
-      if cache.last_entry.enode.meta.address.i == i && cache.last_entry.enode.meta.address.j == j {
-        return PbstRoot::ENode(cache.last_entry.enode.clone());
-      }
-    }
-    // キャッシュの内容が矛盾している
-    panic!("the specified node b_{{{i},{j}}} doesn't exist in the cache")
-  }
-}
-
-pub struct Snapshot<'a, S: Storage<Entry, 0>> {
+pub struct Snapshot<'a, S: Storage<Entry>> {
   cache: Arc<Cache>,
   storage: &'a S,
 }
 
-impl<'a, S: Storage<Entry, 0>> Snapshot<'a, S> {
+impl<'a, S: Storage<Entry>> Snapshot<'a, S> {
   pub fn revision(&self) -> Index {
-    self.cache.n()
+    self.cache.revision()
   }
 
   pub fn query(&self) -> Result<Query> {
     let cursor = self.storage.reader()?;
     let revision = self.cache.clone();
-    Ok(Query { cursor, revision })
+    Ok(Query { cursor, cache: revision })
   }
 }
 
 /// ストレージ上に直列化された Stratified Hash Tree を表す木構造に対する操作を実装します。
-pub struct Slate<S: Storage<Entry, 0>> {
+pub struct Slate<S: Storage<Entry>> {
   position: Position,
   storage: S,
-  latest_cache: Arc<Cache>,
+  cache: Arc<Cache>,
 }
 
-impl<S: Storage<Entry, 0>> Slate<S> {
+impl<S: Storage<Entry>> Slate<S> {
   /// 指定された [`Storage`] に直列化されたハッシュ木を保存する Slate を構築します。
   ///
   /// ストレージに [`std::path::Path`] や [`std::path::PathBuf`] のようなパスを指定したするとそのファイルに
@@ -496,7 +443,7 @@ impl<S: Storage<Entry, 0>> Slate<S> {
   ///   let storage = BlockStorage::from_file(file, false)?;
   ///   let mut db = Slate::new(storage)?;
   ///   let root = db.append(&[0u8, 1, 2, 3])?;
-  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.snapshot().query()?.get(root.i)?.map(|x| x.clone()));
+  ///   assert_eq!(Some(vec![0u8, 1, 2, 3]), db.snapshot().query()?.get(root.address.i)?.map(|x| x.clone()));
   ///   Ok(())
   /// }
   ///
@@ -505,54 +452,50 @@ impl<S: Storage<Entry, 0>> Slate<S> {
   /// append_and_get(&path).expect("test failed");
   /// remove_file(path.as_path()).unwrap();
   /// ```
-  pub fn new(mut storage: S) -> Result<Slate<S>> {
-    let (cache, position) = Self::load_metadata(&mut storage)?;
-    Ok(Slate { position, storage, latest_cache: Arc::new(cache) })
+  pub fn new(storage: S) -> Result<Self> {
+    Self::with_cache_level(storage, 0)
+  }
+
+  /// Build Slate with specified cache level.
+  ///
+  /// In cases where there is a lot of reading, setting the cache level to 1 or 2 may improve performance, but in cases
+  /// where there is a lot of writing, overhead will increase.
+  ///
+  /// The number of entries cached increases as O(ℓ×2^ℓ), so it is not recommended to increase the level.
+  ///
+  pub fn with_cache_level(mut storage: S, level: usize) -> Result<Self> {
+    let (cache, position) = Self::load_metadata(&mut storage, level)?;
+    Ok(Slate { position, storage, cache: Arc::new(cache) })
   }
 
   /// 現在の木構造のルートノードを参照します。
-  pub fn root(&self) -> Option<Node> {
-    self.latest_cache.root()
+  pub fn root(&self) -> Option<&MetaInfo> {
+    self.cache.root()
   }
 
   /// 木構造の現在の世代 (リストとして何個の要素を保持しているか) を返します。
   pub fn n(&self) -> Index {
-    self.latest_cache.n()
+    self.cache.revision()
   }
 
   /// この Slate の現在の高さを参照します。ノードが一つも含まれていない場合は 0 を返します。
   pub fn height(&self) -> u8 {
-    self.root().map(|root| root.j).unwrap_or(0)
+    self.root().map(|root| root.address.j).unwrap_or(0)
   }
 
-  /// この Slate のルートハッシュを参照します。一つのノードも含まれていない場合は `None` を返します。
-  pub fn root_hash(&self) -> Option<Hash> {
-    self.root().map(|root| root.hash)
+  pub fn cache(&self) -> &Cache {
+    &self.cache
   }
 
   pub fn storage(&self) -> &S {
     &self.storage
   }
 
-  fn load_metadata(storage: &mut S) -> Result<(Cache, Position)> {
-    let (latest_entry, position, _) = storage.boot()?;
+  fn load_metadata(storage: &mut S, level: usize) -> Result<(Cache, Position)> {
+    let (latest_entry, position) = storage.boot()?;
     let cache = match latest_entry {
-      Some(entry) => {
-        // PBST ルートノードの読み込み
-        let mut cursor = storage.reader()?;
-        let mut pbst_roots = Vec::with_capacity(entry.inodes.len());
-        for inode in entry.inodes.iter() {
-          let position = inode.left.position;
-          let i_expected = inode.left.i;
-          let entry = read_entry_with_index_check(&mut cursor, position, i_expected)?;
-          let Entry { enode, mut inodes } = entry;
-          let pbst_root = inodes.pop().map(PbstRoot::INode).unwrap_or(PbstRoot::ENode(enode));
-          pbst_roots.push(pbst_root);
-        }
-        let generation = Generation::new(entry.enode.meta.address.i);
-        Cache::new(entry, pbst_roots, generation)
-      }
-      None => Cache::empty(),
+      Some(entry) => Cache::load(storage, level, entry)?,
+      None => Cache::empty(level),
     };
     Ok((cache, position))
   }
@@ -563,14 +506,14 @@ impl<S: Storage<Entry, 0>> Slate<S> {
   /// この操作によって更新されたルートノードを返します。このルートノードは新しい木構造のルートハッシュである
   /// `hash` に加えて、ハッシュ木に含まれる要素数 `i`、ハッシュ木の高さ `j` を持ちます。
   ///
-  pub fn append(&mut self, value: &[u8]) -> Result<Node> {
+  pub fn append(&mut self, value: &[u8]) -> Result<MetaInfo> {
     if value.len() > MAX_PAYLOAD_SIZE {
       return Err(TooLargePayload { size: value.len() });
     }
 
     // 葉ノードの構築
     let position = self.position;
-    let i = self.latest_cache.root().map(|node| node.i + 1).unwrap_or(1);
+    let i = self.cache.root().map(|node| node.address.i + 1).unwrap_or(1);
     let hash = Hash::from_bytes(value);
     let meta = MetaInfo::new(Address::new(i, 0, position), hash);
     let enode = ENode { meta, payload: Vec::from(value) };
@@ -578,9 +521,8 @@ impl<S: Storage<Entry, 0>> Slate<S> {
     // 中間ノードとその左枝にある PBST ルートの構築
     let mut inodes = Vec::<INode>::with_capacity(INDEX_SIZE as usize);
     let mut right_hash = enode.meta.hash;
-    let generation = Generation::new(i);
-    let right_to_left_inodes = generation.inodes();
-    let mut pbst_roots = Vec::with_capacity(ceil_log2(i) as usize);
+    let model = Model::new(i);
+    let right_to_left_inodes = model.inodes();
     for n in right_to_left_inodes.iter() {
       debug_assert_eq!(i, n.node.i);
       debug_assert_eq!(n.node.i, n.right.i);
@@ -588,12 +530,7 @@ impl<S: Storage<Entry, 0>> Slate<S> {
       debug_assert!(n.left.j >= n.right.j);
 
       // 左枝のノード (PBST ルート) を保存
-      let left_node = self.latest_cache.get_pbst_root(n.left.i, n.left.j);
-      let left = match &left_node {
-        PbstRoot::ENode(enode) => enode.meta,
-        PbstRoot::INode(inode) => inode.meta,
-      };
-      pbst_roots.push(left_node);
+      let left = self.cache.get_pbst_root(n.left.i, n.left.j);
 
       // 右枝のノードを保存
       let right = Address::new(n.right.i, n.right.j, position);
@@ -613,14 +550,14 @@ impl<S: Storage<Entry, 0>> Slate<S> {
     self.position = self.storage.put(self.position, &entry)?;
 
     // キャッシュを更新
-    let cache = Cache(Some(CacheInner { last_entry: entry, pbst_roots, generation }));
-    self.latest_cache = Arc::new(cache);
+    let cache = self.cache.migrate(entry, model);
+    self.cache = Arc::new(cache);
 
-    Ok(Node::new(i, j, root_hash))
+    Ok(MetaInfo::new(Address::new(i, j, position), root_hash))
   }
 
   pub fn snapshot(&self) -> Snapshot<'_, S> {
-    Snapshot { cache: self.latest_cache.clone(), storage: &self.storage }
+    Snapshot { cache: self.cache.clone(), storage: &self.storage }
   }
 }
 
@@ -629,7 +566,7 @@ pub enum WalkDirection {
   Left,
   Right,
   Both,
-  Stop,
+  Terminate,
 }
 
 #[derive(Debug)]
@@ -640,13 +577,13 @@ pub struct AuthPath {
 
 pub struct Query {
   cursor: Box<dyn Reader<Entry>>,
-  revision: Arc<Cache>,
+  cache: Arc<Cache>,
 }
 
 impl Query {
   /// このクエリーが対象としている木構造の版 (世代、スナップショットに相当) を参照します。
   pub fn revision(&self) -> Index {
-    self.revision.n()
+    self.cache.revision()
   }
 
   pub fn walk_down<F, E>(&mut self, callback: &mut F) -> Result<()>
@@ -654,10 +591,13 @@ impl Query {
     F: FnMut(Index, Index, u8, &Hash, Option<&[u8]>) -> std::result::Result<WalkDirection, E>,
     E: std::error::Error + 'static,
   {
-    let cache_opt = &self.revision.clone().0;
-    let cache = if let Some(cache) = cache_opt { cache } else { return Ok(()) };
-    let node_index = if cache.last_entry.inodes.is_empty() { 0 } else { cache.last_entry.inodes.len() };
-    self._walk_down(node_index, &cache.last_entry, callback)
+    let cache = self.cache.clone();
+    if let Some(last_entry) = cache.last_entry() {
+      let node_index = if last_entry.inodes.is_empty() { 0 } else { last_entry.inodes.len() };
+      self._walk_down(node_index, last_entry, callback)
+    } else {
+      Ok(())
+    }
   }
 
   fn _walk_down<F, E>(&mut self, node_index: usize, entry: &Entry, callback: &mut F) -> Result<()>
@@ -676,9 +616,11 @@ impl Query {
 
     let dir = (callback)(self.revision(), i, j, hash, value.map(|v| &**v)).map_err(|e| Error::WalkDown(Box::new(e)))?;
 
-    if node_index == 0 || dir == WalkDirection::Stop {
+    // terminate when a leaf node visited or a stop requested
+    if node_index == 0 || dir == WalkDirection::Terminate {
       return Ok(());
     }
+
     if dir == WalkDirection::Right || dir == WalkDirection::Both {
       self._walk_down(node_index - 1, entry, callback)?
     }
@@ -712,7 +654,7 @@ impl Query {
   /// 指定されたインデックスの値を参照します。
   /// 0 を含む範囲外のインデックスを指定した場合は `None` を返します。
   pub fn get(&mut self, i: Index) -> Result<Option<Vec<u8>>> {
-    if i == 0 || i > self.revision.n() {
+    if i == 0 || i > self.cache.revision() {
       return Ok(None);
     }
     let mut value = None;
@@ -721,7 +663,7 @@ impl Query {
         if b_j == 0 {
           if let Some(v) = leaf_value {
             value = Some(v.to_vec());
-            Ok(WalkDirection::Stop)
+            Ok(WalkDirection::Terminate)
           } else {
             inconsistency(format!("The value was not passed at the leaf node b_{b_i} reached"))
           }
@@ -729,7 +671,7 @@ impl Query {
           Ok(WalkDirection::Right)
         }
       } else {
-        let ((_il, _jl), (ir, jr)) = subnodes(b_i, b_j);
+        let ((_il, _jl), (ir, jr)) = subnodes_of(b_i, b_j);
         if contains(ir, jr, i) { Ok(WalkDirection::Right) } else { Ok(WalkDirection::Left) }
       }
     })?;
@@ -750,7 +692,7 @@ impl Query {
   }
 }
 
-fn read_entry_with_index_check(
+pub(crate) fn read_entry_with_index_check(
   r: &mut Box<dyn Reader<Entry>>,
   position: Position,
   expected_index: Index,

@@ -26,10 +26,10 @@ pub trait Serializable: Sized {
 }
 
 /// ハッシュツリーのデータを保存するために抽象化されたストレージです。
-pub trait Storage<S: Serializable, const M: usize> {
+pub trait Storage<S: Serializable> {
   /// 起動時に呼び出され、現在のデータと、次のデータの位置を返します。
   /// ストレージにまだデータが保存されていない場合は None を返します。
-  fn boot(&mut self) -> Result<(Option<S>, Position, Vec<u8>)>;
+  fn boot(&mut self) -> Result<(Option<S>, Position)>;
 
   /// 指定された位置にデータの保存します。
   /// 次のデータの位置を返します。
@@ -37,9 +37,6 @@ pub trait Storage<S: Serializable, const M: usize> {
 
   /// データを読み込むためのカーソルを参照します。
   fn reader(&self) -> Result<Box<dyn Reader<S>>>;
-
-  /// メタデータを書き込みます。
-  fn flush_metadata(&mut self, metadata: &[u8]) -> Result<()>;
 }
 
 /// ストレージからデータを読み込むためのカーソルです。
@@ -107,16 +104,16 @@ impl BlockStorage<FileDevice> {
   }
 }
 
-impl<B: BlockDevice + 'static, S: Serializable, const M: usize> Storage<S, M> for BlockStorage<B> {
+impl<B: BlockDevice + 'static, S: Serializable> Storage<S> for BlockStorage<B> {
   fn reader(&self) -> Result<Box<dyn Reader<S>>> {
     let device = self.device.clone_device()?;
     Ok(Box::new(device))
   }
 
-  fn boot(&mut self) -> Result<(Option<S>, Position, Vec<u8>)> {
-    let (data, position, metadata) = boot(&mut self.device, M)?;
+  fn boot(&mut self) -> Result<(Option<S>, Position)> {
+    let (data, position) = boot(&mut self.device)?;
     self.position = position;
-    Ok((data, position, metadata))
+    Ok((data, position))
   }
 
   fn put(&mut self, position: Position, data: &S) -> Result<Position> {
@@ -126,15 +123,6 @@ impl<B: BlockDevice + 'static, S: Serializable, const M: usize> Storage<S, M> fo
     bw.flush()?;
     self.position += length as u64;
     Ok(self.position)
-  }
-
-  fn flush_metadata(&mut self, metadata: &[u8]) -> Result<()> {
-    assert_eq!(M, metadata.len());
-    self.device.seek(SeekFrom::Start(4))?;
-    self.device.write_all(metadata)?;
-    self.device.flush()?;
-    self.device.seek(SeekFrom::End(0))?;
-    Ok(())
   }
 }
 
@@ -152,19 +140,15 @@ pub(crate) fn is_version_compatible(version: u8) -> bool {
   version <= STORAGE_VERSION
 }
 
-fn boot<C, S: Serializable>(cursor: &mut C, meta_data_size: usize) -> Result<(Option<S>, Position, Vec<u8>)>
+fn boot<C, S: Serializable>(cursor: &mut C) -> Result<(Option<S>, Position)>
 where
   C: Write + Read + Seek,
 {
-  let mut meta_data = vec![0u8; meta_data_size];
   match cursor.seek(SeekFrom::End(0))? {
     0 => {
       // マジックナンバーの書き込み
       cursor.write_all(&STORAGE_IDENTIFIER)?;
       cursor.write_u8(STORAGE_VERSION)?;
-      // メタデータの書き込み
-      cursor.write_all(&meta_data)?;
-      cursor.flush()?;
     }
     1..=3 => return Err(StorageisNotForSlate { message: "bad magic number" }),
     _ => {
@@ -177,8 +161,6 @@ where
       } else if !is_version_compatible(buffer[3]) {
         return Err(IncompatibleVersion(buffer[3] >> 4, buffer[3] & 0x0F));
       }
-      // メタデータの読み込み
-      cursor.read_exact(&mut meta_data)?;
     }
   }
 
@@ -206,7 +188,7 @@ where
     Some(data)
   };
 
-  Ok((latest_entry, next_position, meta_data.to_vec()))
+  Ok((latest_entry, next_position))
 }
 
 /// 指定されたカーソルを現在の位置から `distance` バイト前方に移動します。移動先がカーソルの先頭を超える場合は

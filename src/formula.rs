@@ -1,3 +1,5 @@
+//! This module extracts mathematical formulas used in Slate.
+//!
 use std::fmt::Debug;
 use std::ops::RangeInclusive;
 
@@ -28,14 +30,14 @@ pub const INDEX_SIZE: u8 = 32;
 /// Slate のアルゴリズムで使用する任意のノード b_{i,j} を表すための構造体です。
 ///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
-pub struct Node {
+pub struct Addr {
   pub i: Index,
   pub j: u8,
 }
 
-impl Node {
-  pub fn new(i: Index, j: u8) -> Node {
-    Node { i, j }
+impl Addr {
+  pub fn new(i: Index, j: u8) -> Addr {
+    Addr { i, j }
   }
 }
 
@@ -43,28 +45,28 @@ impl Node {
 ///
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct INode {
-  pub node: Node,
-  pub left: Node,
-  pub right: Node,
+  pub node: Addr,
+  pub left: Addr,
+  pub right: Addr,
 }
 
 impl INode {
-  pub fn new(node: Node, left: Node, right: Node) -> INode {
+  pub fn new(node: Addr, left: Addr, right: Addr) -> INode {
     INode { node, left, right }
   }
 }
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub struct Step {
-  pub step: Node,
-  pub neighbor: Node,
+  pub step: Addr,
+  pub neighbor: Addr,
 }
 
 /// 目的のノードまでの経路を、その経路から分岐した先のノードのハッシュ値を含む経路を表します。
 /// 目的のノードまでの経路を表します。経路は `root` から開始し各ステップの `step` で示したノードをたどります。
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Path {
-  pub root: Node,
+  pub root: Addr,
   pub steps: Vec<Step>,
 }
 
@@ -72,21 +74,21 @@ pub struct Path {
 /// アルゴリズムを実装します。
 ///
 #[derive(PartialEq, Eq, Clone, Debug)]
-pub struct Generation {
+pub struct Model {
   n: Index,
-  pbst_roots: Vec<Node>,
+  pbst_roots: Vec<Addr>,
   ephemeral_nodes: Vec<INode>,
 }
 
-impl Generation {
+impl Model {
   /// 木構造 𝑇ₙ に含まれる独立した完全二分木のルートノードとそれらを接続する中間ノードを算出します。この列は木構造の
   /// 左に存在する完全二分木が先に来るように配置されています。
   /// 時間/空間計算量は O(log n) です。
   pub fn new(n: Index) -> Self {
     debug_assert_ne!(0, n);
     let pbst_roots = Self::create_pbst_roots(n);
-    let ephemeral_nodes = Self::create_ephemeral_nodes(n, &pbst_roots);
     debug_assert_ne!(0, pbst_roots.len());
+    let ephemeral_nodes = Self::create_ephemeral_nodes(n, &pbst_roots);
     Self { n, pbst_roots, ephemeral_nodes }
   }
 
@@ -96,12 +98,12 @@ impl Generation {
   }
 
   /// このハッシュ木のルートノードを参照します。
-  pub fn root(&self) -> Node {
+  pub fn root(&self) -> Addr {
     self.ephemeral_nodes.first().map(|i| i.node).unwrap_or(*self.pbst_roots.first().unwrap())
   }
 
   /// 独立した完全二分木のルートノードを列挙します。
-  pub fn pbst_roots(&self) -> impl Iterator<Item = &Node> {
+  pub fn pbst_roots(&self) -> impl Iterator<Item = &Addr> {
     self.pbst_roots.iter()
   }
 
@@ -121,9 +123,9 @@ impl Generation {
       let i = node.i;
       for j in 0..node.j {
         let j = node.j - j;
-        let left = Node::new(i - (1 << j) + (1 << (j - 1)), j - 1);
-        let right = Node::new(i, j - 1);
-        inodes.push(INode::new(Node::new(i, j), left, right))
+        let left = Addr::new(i - (1 << j) + (1 << (j - 1)), j - 1);
+        let right = Addr::new(i, j - 1);
+        inodes.push(INode::new(Addr::new(i, j), left, right))
       }
     }
     inodes.reverse();
@@ -217,25 +219,25 @@ impl Generation {
   fn pbst_inode(i: Index, j: u8) -> INode {
     debug_assert!(is_pbst(i, j), "({i}, {j}) is not a PBST");
     debug_assert_ne!(0, j, "({i}, {j}) is a leaf node, not a inode");
-    INode::new(Node::new(i, j), Node::new(i - (1 << (j - 1)), j - 1), Node::new(i, j - 1))
+    INode::new(Addr::new(i, j), Addr::new(i - (1 << (j - 1)), j - 1), Addr::new(i, j - 1))
   }
 
   /// T_n に含まれる完全二分木のルートノードを構築します。
-  fn create_pbst_roots(n: Index) -> Vec<Node> {
+  fn create_pbst_roots(n: Index) -> Vec<Addr> {
     let capacity = ceil_log2(n) as usize;
     let mut remaining = n;
-    let mut pbsts = Vec::<Node>::with_capacity(capacity);
+    let mut pbsts = Vec::<Addr>::with_capacity(capacity);
     while remaining != 0 {
       let j = floor_log2(remaining);
       let i = n - remaining + (1 << j);
-      pbsts.push(Node::new(i, j));
+      pbsts.push(Addr::new(i, j));
       remaining -= 1 << j;
     }
     pbsts
   }
 
   /// 一過性の中間ノードを参照します。
-  fn create_ephemeral_nodes(n: Index, pbsts: &[Node]) -> Vec<INode> {
+  fn create_ephemeral_nodes(n: Index, pbsts: &[Addr]) -> Vec<INode> {
     debug_assert_ne!(0, pbsts.len());
     let mut ephemerals = Vec::<INode>::with_capacity(pbsts.len() - 1);
     for i in 0..pbsts.len() - 1 {
@@ -243,7 +245,7 @@ impl Generation {
       ephemerals.insert(
         0,
         INode {
-          node: Node::new(n, pbsts[position - 1].j + 1),
+          node: Addr::new(n, pbsts[position - 1].j + 1),
           left: pbsts[position - 1],
           right: if i != 0 { ephemerals[0].node } else { pbsts[position] },
         },
@@ -258,92 +260,149 @@ impl Generation {
 pub fn range(i: Index, j: u8) -> RangeInclusive<Index> {
   debug_assert!(j <= 64); // i=u64::MAX のとき j=64
   // let i_min = (((i as u128 >> j) - (if is_pbst(i, j) { 1 } else { 0 })) << j) as u64 + 1;
-  let i_min = i - mod2pow(i - 1, j);
+  let i_min = i - i_mod_2e(i - 1, j);
   let i_max = i;
   i_min..=i_max
 }
 
-/// 任意のノード b_{i,j} をルートとする部分木 T_{i,j} に含まれている葉ノードの数 r_{i,j} を O(1) で算出します。
+/// Calculates the root index b_{i,j} of any generation n in O(1).
+#[inline]
+pub fn root_of(n: Index) -> (Index, u8) {
+  debug_assert!(n > 0);
+  let i = n;
+  let j = ceil_log2(n);
+  (i, j)
+}
+
+/// Calculates the indices of node b_{il,jl} and b_{ir,jr} connected to the left and right child nodes of any node
+/// b_{i,j} in O(1).
+#[inline]
+pub fn subnodes_of(i: Index, j: u8) -> ((Index, u8), (Index, u8)) {
+  debug_assert!(is_valid(i, j), "({i}, {j})");
+  let left_upper = if j < INDEX_SIZE { (i - 1) >> j << j } else { 0 };
+  let left_lower = pow2e(j - 1);
+  let left = (left_upper | left_lower, j - 1);
+  let right = (i, ceil_log2(i - left.0));
+  (left, right)
+}
+
+/// Determines whether a node b_{i,j} can exist in O(1).
+#[inline]
+pub fn is_valid(i: Index, j: u8) -> bool {
+  if i == 0 {
+    // 0-th generation doesn't exist
+    false
+  } else if j == 0 {
+    // j = 0, leaf node, is always valid
+    true
+  } else {
+    let height = ceil_log2(i);
+    if j > height {
+      // j exceeds the calculated height limit
+      false
+    } else if j == height {
+      // j = height, root of that generation, is always valid
+      true
+    } else if is_pbst(i, j) {
+      // b'_{i,j} always valid
+      true
+    } else {
+      // 一過性ノードの条件
+      // i mod 2^j > 2^(j-1) の場合、高さjの一過性ノードが必要
+      let remainder = i & ((1u64 << j) - 1);
+      remainder > (1u64 << (j - 1))
+    }
+  }
+}
+
+/// 任意のノード b_{i,j} をルートとする部分木 T_{i,j} に含まれている葉ノードの数 r_{i,j} を算出します。
 #[inline]
 pub fn leaf_count(i: Index, j: u8) -> Index {
-  mod2pow(i - 1, j) + 1
+  i_mod_2e(i - 1, j) + 1
 }
 
-/// 指定されたノード b_{i,j} の左右の枝に接続されているノード b_{il,jl} と b_{ir,jr} のインデックスを O(1) で算出します。
-#[inline]
-pub fn subnodes(i: Index, j: u8) -> ((Index, u8), (Index, u8)) {
-  debug_assert!(j > 0 && j <= 64);
-  let il = i - mod2pow(i - 1, j) + pow(j - 1) - 1;
-  let jl = j - 1;
-  let ir = i;
-  let jr = ceil_log2(i - il);
-  ((il, jl), (ir, jr))
-}
-
-/// 指定されたノード b_{i,j} をルートとする部分木にノード b_{k,\*} が含まれているかを O(1) で判定します。これは T_{k,*} が
-/// T_{i,j} の部分木かを判定することと意味的に同じです。
+/// 指定されたノード b_{i,j} をルートとする部分木にノード b_{k,\*} が含まれているかを判定します。これは T_{k,*} が
+/// T_{i,j} の部分木かどうかを判定することと意味的に同じです。
 #[inline]
 pub fn contains(i: Index, j: u8, k: Index) -> bool {
   debug_assert!(j <= 64); // i=u64::MAX のとき j=64
   range(i, j).contains(&k)
 }
 
-/// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを O(1) で判定します。
+/// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを判定します。
 #[inline]
 pub fn is_pbst(i: Index, j: u8) -> bool {
-  mod2pow(i, j) == 0
+  i_mod_2e(i, j) == 0
 }
 
-/// i mod 2^j を O(1) で算出します。
+/// i mod 2^j を算出します。j∈{0,…,64} の値を指定することができます。
+///
+/// ```
+/// use slate::formula::i_mod_2e;
+/// assert_eq!(0, i_mod_2e(u64::MAX, 0));
+/// assert_eq!(1, i_mod_2e(u64::MAX, 1));
+/// assert_eq!(3, i_mod_2e(u64::MAX, 2));
+/// assert_eq!(7, i_mod_2e(u64::MAX, 3));
+/// assert_eq!(u64::MAX, i_mod_2e(u64::MAX, 64));
+/// ```
 #[inline]
-fn mod2pow(i: Index, j: u8) -> Index {
+pub fn i_mod_2e(i: Index, j: u8) -> Index {
   debug_assert!(j <= 64);
-  i & (((1u128 << j) - 1) as Index)
+  // Typically, j < 64, so branch prediction is effective. If we use 128-bit arithmetic and remove conditional branch,
+  // the CPU breaks it down into multiple instructions, which incures casting overhead and is slower than conditional
+  // branches.
+  if j >= 64 { i } else { i & ((1u64 << j) - 1) }
 }
 
-/// 2^j を O(1) で算出します。
+/// 2^j を算出します。j∈{0,…,63} の値を指定することができます。
+///
+/// ```
+/// use slate::formula::pow2e;
+/// assert_eq!(1, pow2e(0));
+/// assert_eq!(2, pow2e(1));
+/// assert_eq!(4, pow2e(2));
+/// assert_eq!(8, pow2e(3));
+/// assert_eq!(u64::MAX / 2 + 1, pow2e(63));
+/// ```
 #[inline]
-fn pow(j: u8) -> Index {
+pub fn pow2e(j: u8) -> Index {
   debug_assert!(j < 64);
   1u64 << j
 }
 
-/// 指定された `x` に対して `𝑦=⌈log₂ 𝑥⌉` を求めます。返値は 0 (x=1) から 64 (x=u64::MAX) の範囲となります。
-/// `x` に 0 を指定することはできません。
+/// 指定された 𝑥 に対して 𝑦=⌈log₂ 𝑥⌉ を求めます。返値は 0 (x=1) から 64 (x=u64::MAX) の範囲となります。
+/// 𝑥 に 0 を指定することはできません。
+///
+/// ```
+/// use slate::formula::ceil_log2;
+/// assert_eq!(0, ceil_log2(1));
+/// assert_eq!(1, ceil_log2(2));
+/// assert_eq!(2, ceil_log2(3));
+/// assert_eq!(8, ceil_log2(255));
+/// assert_eq!(8, ceil_log2(256));
+/// assert_eq!(9, ceil_log2(257));
+/// assert_eq!(64, ceil_log2(u64::MAX));
+/// ```
 #[inline]
 pub fn ceil_log2(x: Index) -> u8 {
-  let rank = floor_log2(x);
-  rank + (if x & ((1 << rank) - 1) == 0 { 0 } else { 1 })
+  debug_assert!(x > 0);
+  (INDEX_SIZE as u32 - (x - 1).leading_zeros()) as u8
 }
 
-/// 指定された `x` に対して `𝑦=⌊log₂ 𝑥⌋` を求めます。返値は 0 (x=1) から 63 (x=u64::MAX) の範囲となります。
-/// `x` に 0 を指定することはできません。
+/// 指定された 𝑥 に対して 𝑦=⌊log₂ 𝑥⌋ を求めます。返値は 0 (x=1) から 63 (x=u64::MAX) の範囲となります。
+/// 𝑥 に 0 を指定することはできません。
+///
+/// ```
+/// use slate::formula::floor_log2;
+/// assert_eq!(0, floor_log2(1));
+/// assert_eq!(1, floor_log2(2));
+/// assert_eq!(1, floor_log2(3));
+/// assert_eq!(7, floor_log2(255));
+/// assert_eq!(8, floor_log2(256));
+/// assert_eq!(63, floor_log2(u64::MAX));
+/// ```
 #[inline]
 pub fn floor_log2(x: Index) -> u8 {
-  // まずビット列の中で最も上位に存在する 1 の位置より右側のすべてのビットが 1 となるようにビット論理和を繰り返し、
-  // 次に数値内で 1 となっているビットの数を数えるというアプローチ (可能であれば後半は POPCNT CPU 命令が使う方が
-  // 良いかもしれない)。
-  // See also: https://qiita.com/pochman/items/d74930a62613bb8d3d00,
-  // http://www.nminoru.jp/~nminoru/programming/bitcount.html
   debug_assert!(x > 0);
-  let mut bits = x;
-  bits = bits | (bits >> 1);
-  bits = bits | (bits >> 2);
-  bits = bits | (bits >> 4);
-  bits = bits | (bits >> 8);
-  bits = bits | (bits >> 16);
-  bits = bits | (bits >> 32);
-  bits = (bits & 0b0101010101010101010101010101010101010101010101010101010101010101)
-    + (bits >> 1 & 0b0101010101010101010101010101010101010101010101010101010101010101);
-  bits = (bits & 0b0011001100110011001100110011001100110011001100110011001100110011)
-    + (bits >> 2 & 0b0011001100110011001100110011001100110011001100110011001100110011);
-  bits = (bits & 0b0000111100001111000011110000111100001111000011110000111100001111)
-    + (bits >> 4 & 0b0000111100001111000011110000111100001111000011110000111100001111);
-  bits = (bits & 0b0000000011111111000000001111111100000000111111110000000011111111)
-    + (bits >> 8 & 0b0000000011111111000000001111111100000000111111110000000011111111);
-  bits = (bits & 0b0000000000000000111111111111111100000000000000001111111111111111)
-    + (bits >> 16 & 0b0000000000000000111111111111111100000000000000001111111111111111);
-  bits = (bits & 0b0000000000000000000000000000000011111111111111111111111111111111)
-    + (bits >> 32 & 0b0000000000000000000000000000000011111111111111111111111111111111);
-  bits as u8 - 1
+  x.ilog2() as u8
 }
