@@ -1,4 +1,5 @@
-use std::cmp::min;
+use std::cmp::{max, min};
+use std::collections::HashSet;
 use std::env::temp_dir as temprary_directory;
 use std::fs::{OpenOptions, create_dir_all};
 use std::io::ErrorKind;
@@ -6,7 +7,7 @@ use std::path::{MAIN_SEPARATOR, PathBuf};
 use std::sync::RwLock;
 use std::thread::{JoinHandle, spawn};
 
-use crate::formula::ceil_log2;
+use crate::formula::{auth_path_length, ceil_log2, total_nodes};
 use crate::memory::MemoryDevice;
 use crate::*;
 
@@ -173,6 +174,221 @@ pub fn verify_storage_spec<S: Storage<Entry>>(storage: &mut S) {
       assert_eq!(&expected, &entry);
     }
   }
+}
+
+#[test]
+fn referencing_a_specific_snapshot() {
+  let storage = BlockStorage::memory();
+  let mut db = Slate::new(storage).unwrap();
+  assert!(db.snapshot_at(0).is_err());
+  assert!(db.snapshot_at(1).is_err());
+
+  let mut roots = Vec::new();
+  for n in 1..=64 {
+    roots.push(db.append(&[n - 1]).unwrap());
+  }
+
+  assert!(db.snapshot_at(0).is_err());
+  assert!(db.snapshot_at(65).is_err());
+  for n in 1..=64 {
+    let snapshot = db.snapshot_at(n).unwrap();
+    let root = snapshot.root();
+    assert_eq!(n, root.address.i);
+    assert_eq!(roots[n as usize - 1], root);
+    assert_eq!(None, snapshot.query().unwrap().get(0).unwrap());
+    assert_eq!(vec![0u8], snapshot.query().unwrap().get(1).unwrap().unwrap());
+    assert_eq!(vec![n as u8 - 1], snapshot.query().unwrap().get(n).unwrap().unwrap());
+    assert_eq!(None, snapshot.query().unwrap().get(n + 1).unwrap());
+  }
+}
+
+#[test]
+fn walk_down_for_empty() {
+  let storage = BlockStorage::memory();
+  let db = Slate::new(storage).unwrap();
+  let snapshot = db.snapshot();
+  let mut query = snapshot.query().unwrap();
+  let mut count = 0;
+  query
+    .walk_down(&mut |_, i, j, _, _| {
+      println!("({i}, {j})");
+      count += 1;
+      WalkDirection::Both
+    })
+    .unwrap();
+  assert_eq!(0, count);
+}
+
+#[test]
+fn walk_down_randomly_left_and_right() {
+  let mut rand = splitmix64(9876543210);
+  for _ in 0..512 {
+    let storage = BlockStorage::memory();
+    let mut db = Slate::new(storage).unwrap();
+    rand = splitmix64(rand);
+    for i in 1..=((rand % 0xFF) as u8) {
+      db.append(&[i]).unwrap();
+    }
+    let snapshot = db.snapshot();
+
+    let mut next = None;
+    let mut query = snapshot.query().unwrap();
+    query
+      .walk_down(&mut |_revision, i, j, _hash, _value| {
+        if let Some((i2, j2)) = next {
+          assert!(i == i2 && j == j2);
+        }
+        if j == 0 {
+          next = None;
+          WalkDirection::Terminate
+        } else {
+          let ((il, jl), (ir, jr)) = subnodes_of(i, j);
+          rand = splitmix64(rand);
+          if rand % 2 == 0 {
+            next = Some((il, jl));
+            WalkDirection::Left
+          } else {
+            next = Some((ir, jr));
+            WalkDirection::Right
+          }
+        }
+      })
+      .unwrap();
+    assert_eq!(None, next);
+  }
+}
+
+#[test]
+fn walk_down_all_nodes() {
+  let mut rand = splitmix64(!9876543210);
+  for _ in 0..512 {
+    let storage = BlockStorage::memory();
+    let mut db = Slate::new(storage).unwrap();
+    rand = splitmix64(rand);
+    for i in 0..=max(1, (rand % 0xFF) as u8) {
+      db.append(&[i]).unwrap();
+    }
+    let snapshot = db.snapshot();
+
+    let mut nodes = HashSet::new();
+    let mut query = snapshot.query().unwrap();
+    query
+      .walk_down(&mut |_revision, i, j, _hash, _value| {
+        assert!(nodes.insert((i, j)), "duplicate visited: ({i}, {j})");
+        WalkDirection::Both
+      })
+      .unwrap();
+    assert_eq!(total_nodes(snapshot.revision()), nodes.len() as u128);
+  }
+}
+
+#[test]
+fn generate_auth_path() {
+  // auth path cannot obtain from empty tree
+  let storage = BlockStorage::memory();
+  let mut db = Slate::new(storage).unwrap();
+  let snapshot = db.snapshot();
+  let mut query = snapshot.query().unwrap();
+  assert_eq!(None, query.get_auth_path(0).unwrap());
+  assert_eq!(None, query.get_auth_path(1).unwrap());
+
+  for n in 1..=64 {
+    db.append(&[n - 1]).unwrap();
+    let snapshot = db.snapshot();
+    let mut query = snapshot.query().unwrap();
+    assert!(query.get_auth_path(0).unwrap().is_none());
+    for i in 1..=n {
+      let auth = query.get_auth_path(i as Index).unwrap().unwrap();
+      assert_eq!(i as Index, auth.leaf.i);
+      assert_eq!(vec![i - 1], auth.leaf.value);
+      assert_eq!(auth_path_length(n as Index, i as Index), auth.witnesses.len() as u8, "{n}: {auth:?}");
+    }
+    assert!(query.get_auth_path(n as Index + 1).unwrap().is_none());
+  }
+}
+
+#[test]
+fn compare_auth_path() {
+  // generate auth pathes from the same trees and confirm that they match
+  let mut db1 = Slate::new(BlockStorage::memory()).unwrap();
+  let mut db2 = Slate::new(BlockStorage::memory()).unwrap();
+  for n in 1..=64 {
+    db1.append(&[n - 1]).unwrap();
+    db2.append(&[n - 1]).unwrap();
+    let s1 = db1.snapshot();
+    let s2 = db2.snapshot();
+    let mut q1 = s1.query().unwrap();
+    let mut q2 = s2.query().unwrap();
+    for i in 1..=n {
+      let auth1 = q1.get_auth_path(i as Index).unwrap().unwrap();
+      let auth2 = q2.get_auth_path(i as Index).unwrap().unwrap();
+      assert_eq!(db1.root(), db2.root());
+      assert_eq!(auth1.root_hash().unwrap(), auth2.root_hash().unwrap());
+      assert_eq!(db1.root().unwrap().hash, auth1.root_hash().unwrap());
+      assert_eq!(Prove::Identical, auth1.prove(&auth2).unwrap());
+    }
+  }
+}
+
+#[test]
+fn detect_differences_in_auth_paths() {
+  const N: Index = 1024;
+  let rand = splitmix64(1231239999);
+  let garbling_index = rand % N + 1;
+  let garbling_bit = ((rand / (N + 1)) % u8::BITS as Index) as usize;
+  println!("grabling b_{garbling_index}:{garbling_bit}");
+
+  // build instances that differ by only 1-bit
+  let mut db1 = Slate::new(BlockStorage::memory()).unwrap();
+  let mut db2 = Slate::new(BlockStorage::memory()).unwrap();
+  for n in 1..=N {
+    let b = (splitmix64(n) & 0xFF) as u8;
+    db1.append(&[b]).unwrap();
+    if n != garbling_index {
+      db2.append(&[b]).unwrap();
+    } else {
+      db2.append(&[b ^ (1 << garbling_bit)]).unwrap();
+    }
+  }
+  assert_ne!(db1.root(), db2.root());
+  let s1 = db1.snapshot();
+  let s2 = db2.snapshot();
+  let mut q1 = s1.query().unwrap();
+  let mut q2 = s2.query().unwrap();
+  for i in 1..=N {
+    let auth1 = q1.get_auth_path(i as Index).unwrap().unwrap();
+    let auth2 = q2.get_auth_path(i as Index).unwrap().unwrap();
+    assert_ne!(db1.root(), db2.root());
+    assert_ne!(auth1.root_hash().unwrap(), auth2.root_hash().unwrap());
+    assert_eq!(db1.root().unwrap().hash, auth1.root_hash().unwrap());
+    assert_eq!(db2.root().unwrap().hash, auth2.root_hash().unwrap());
+    match auth1.prove(&auth2).unwrap() {
+      Prove::Identical => panic!(),
+      Prove::Divergent(divergents) => {
+        assert_eq!(1, divergents.len(), "{auth1:?} {auth2:?}");
+        let (i, j) = divergents[0];
+        assert!(contains(i, j, garbling_index));
+      }
+    }
+  }
+
+  // find the index of different leaf nodes
+  let mut auth1 = q1.get_auth_path(s1.revision()).unwrap().unwrap();
+  let mut steps = 0;
+  let detected_i = loop {
+    let auth2 = q2.get_auth_path(auth1.leaf.i).unwrap().unwrap();
+    let (i, j) = match auth2.prove(&auth1).unwrap() {
+      Prove::Divergent(divergents) => divergents[0],
+      Prove::Identical => panic!(),
+    };
+    steps += 1;
+    if j == 0 {
+      break i;
+    }
+    auth1 = q1.get_auth_path(i).unwrap().unwrap();
+  };
+  println!("{steps} interactions");
+  assert_eq!(garbling_index, detected_i);
 }
 
 fn build_entry(i: Index, value: &[u8], positions: &[Index]) -> Entry {

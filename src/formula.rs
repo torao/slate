@@ -56,20 +56,6 @@ impl INode {
   }
 }
 
-#[derive(Eq, PartialEq, Copy, Clone, Debug)]
-pub struct Step {
-  pub step: Addr,
-  pub neighbor: Addr,
-}
-
-/// 目的のノードまでの経路を、その経路から分岐した先のノードのハッシュ値を含む経路を表します。
-/// 目的のノードまでの経路を表します。経路は `root` から開始し各ステップの `step` で示したノードをたどります。
-#[derive(Eq, PartialEq, Clone, Debug)]
-pub struct Path {
-  pub root: Addr,
-  pub steps: Vec<Step>,
-}
-
 /// n≧1 世代のハッシュ木構造 𝑇ₙ をアルゴリズムによって表す概念モデルです。n 世代木における中間ノードや探索経路などの
 /// アルゴリズムを実装します。
 ///
@@ -132,78 +118,6 @@ impl Model {
     inodes
   }
 
-  /// 一過性の中間ノードをたどって b_{i,j} を含む完全二分木のルートノードを検索します。ノードを 1 ステップ進むたびに
-  /// `on_step(from, to)` のコールバックが行われます。b_{i,j} が一過性の中間ノードの場合 `Either::Right(node)`
-  /// を返し、b_{i,j} を含む完全二分木のルートノードの場合 `Either::Left(root)` を返します。
-  pub fn path_to(&self, i: Index, j: u8) -> Option<Path> {
-    let root = self.root();
-    if !contains(root.i, root.j, i) {
-      return None;
-    }
-
-    // 一過性の中間ノードをたどって b_{i,j} を含む完全二分木のルートノードを検索する
-    let mut steps = Vec::<Step>::with_capacity(INDEX_SIZE as usize);
-    let pbst = if let Some(pbst) = self.ephemeral_nodes.last().map(|i| i.right) {
-      let mut pbst = pbst;
-      for x in 0..self.ephemeral_nodes.len() {
-        let node = &self.ephemeral_nodes[x];
-
-        // 目的のノードを検出した場合
-        if node.node.i == i && node.node.j == j {
-          return Some(Path { root, steps });
-        }
-
-        // 左枝側 (完全二分木) に含まれている場合は左枝を始点に設定
-        if contains(node.left.i, node.left.j, i) {
-          steps.push(Step { step: node.left, neighbor: node.right });
-          pbst = node.left;
-          break;
-        }
-
-        // このノードの次のステップを保存
-        steps.push(Step { step: node.right, neighbor: node.left });
-      }
-      pbst
-    } else {
-      root
-    };
-
-    if pbst.i == i && pbst.j == j {
-      return Some(Path { root, steps });
-    } else if pbst.j < j {
-      return None;
-    }
-
-    // 完全二分木上の経路を構築
-    let mut mover = Self::pbst_inode(pbst.i, pbst.j);
-    for _ in 0..INDEX_SIZE {
-      // 目的のノードを検出した場合
-      if mover.node.i == i && mover.node.j == j {
-        return Some(Path { root, steps });
-      }
-      let (next, neighbor) = if contains(mover.left.i, mover.left.j, i) {
-        (mover.left, mover.right)
-      } else {
-        debug_assert!(
-          contains(mover.right.i, mover.right.j, i),
-          "the subtree T_{{{},{}}} doesn't contain node b_{{{},{}}}",
-          mover.right.i,
-          mover.right.j,
-          i,
-          j
-        );
-        (mover.right, mover.left)
-      };
-      steps.push(Step { step: next, neighbor });
-      if next.j != 0 {
-        mover = Self::pbst_inode(next.i, next.j);
-      } else {
-        return Some(Path { root, steps });
-      }
-    }
-    unreachable!("maximum step was reached in searching the route to ({}, {}) -> {:?}", i, j, steps)
-  }
-
   /// 指定された中間ノード b_{i,j} を返します。該当する中間ノードが存在しない場合は `None` を返します。
   pub fn inode(&self, i: Index, j: u8) -> Option<INode> {
     if j == 0 {
@@ -253,6 +167,14 @@ impl Model {
     }
     ephemerals
   }
+}
+
+/// Calculates the total number of nodes in the n-th generation.
+/// The return value includes the number of leaf nodes.
+/// 𝑓:0 → 0, 𝑓:(n) → 2×n-1, 𝑓:(2⁶⁴-1) → (2⁶⁴-1)×2-1
+#[inline]
+pub fn total_nodes(n: Index) -> u128 {
+  if n == 0 { 0 } else { 2 * n as u128 - 1 }
 }
 
 /// 任意のノード b_{i,j} をルートとする部分木に含まれる葉ノード b_ℓ の範囲を O(1) で算出します。
@@ -327,6 +249,27 @@ pub fn leaf_count(i: Index, j: u8) -> Index {
 pub fn contains(i: Index, j: u8, k: Index) -> bool {
   debug_assert!(j <= 64); // i=u64::MAX のとき j=64
   range(i, j).contains(&k)
+}
+
+/// 認証パスの長さを算出します。
+/// この呼び出しは最悪ケースで O(log n) の計算量です。
+#[inline]
+pub fn auth_path_length(n: Index, i: Index) -> u8 {
+  fn _branch_count(ti: Index, i: Index, j: u8, count: u8) -> u8 {
+    if j == 0 {
+      count
+    } else {
+      let ((il, jl), (ir, jr)) = subnodes_of(i, j);
+      if contains(il, jl, ti) {
+        _branch_count(ti, il, jl, count + 1)
+      } else {
+        debug_assert!(contains(ir, jr, ti));
+        _branch_count(ti, ir, jr, count + 1)
+      }
+    }
+  }
+  let (ri, rj) = root_of(n);
+  if contains(ri, rj, i) { _branch_count(i, ri, rj, 0) } else { 0 }
 }
 
 /// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを判定します。

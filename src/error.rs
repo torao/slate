@@ -36,14 +36,19 @@ pub enum Error {
   #[error("INCONSISTENCY STATE: between the internally state and the data in storage; {message}")]
   InternalStateInconsistency { message: String },
 
+  // 認証パス比較時のエラー
+  #[error("{0}")]
+  AuthPathVerificationFailed(String),
+
+  /// 不正なパラメータ指定
+  #[error("{0}")]
+  InvalidArgument(String),
+
   #[error("I/O error: {source}")]
   Io {
     #[from]
     source: std::io::Error,
   },
-
-  #[error("The traversal function returned an error during the walk down: {0}")]
-  WalkDown(Box<dyn std::error::Error>),
 
   #[error("{source}")]
   Otherwise {

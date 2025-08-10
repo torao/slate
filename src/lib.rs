@@ -10,49 +10,29 @@
 //!
 //! ```rust
 //! use slate::{BlockStorage, Slate, Value, Node};
-//! let mut db = Slate::new(BlockStorage::memory()).unwrap();
 //!
-//! // Returns None for non-existent indices.
-//! let mut query = db.snapshot().query().unwrap();
-//! assert_eq!(None, query.get(1).unwrap());
-//! assert_eq!(None, query.get(2).unwrap());
+//! let mut slate = Slate::new_on_memory();
+//! slate.append("first".as_bytes()).unwrap();
+//! slate.append("second".as_bytes()).unwrap();
+//! slate.append("third".as_bytes()).unwrap();
 //!
-//! // The first value is considered to index 1, and they are simply incremented thereafter.
-//! let first = "first".as_bytes();
-//! let root = db.append(first).unwrap();
-//! let mut query = db.snapshot().query().unwrap();
-//! assert_eq!(1, root.address.i);
-//! assert_eq!(first, query.get(root.address.i).unwrap().unwrap());
-//! assert_eq!(None, query.get(2).unwrap());
-//!
-//! // Similar to the typical hash tree, you can refer to a verifiable value using root hash.
-//! let second = "second".as_bytes();
-//! let third = "third".as_bytes();
-//! db.append(second).unwrap();
-//! let root = db.append(third).unwrap();
-//! let mut query = db.snapshot().query().unwrap();
-//! // TODO: replace to AuthPath
-//! //let values = query.get_values_with_hashes(2, 0).unwrap().unwrap();
-//! //assert_eq!(1, values.values.len());
-//! //assert_eq!(Value::new(2, second.to_vec()), values.values[0]);
-//! //assert_eq!(Node::new(3, 2, root.hash), values.root());
-//!
-//! // By specifying `j` greater than 0, you can refer to contiguous values that belongs to
-//! // the binary subtree. The following refers to the values belonging to intermediate nodes b₂₁.
-//! //let values = query.get_values_with_hashes(2, 1).unwrap().unwrap();
-//! //assert_eq!(2, values.values.len());
-//! //assert_eq!(Value::new(1, first.to_vec()), values.values[0]);
-//! //assert_eq!(Value::new(2, second.to_vec()), values.values[1]);
-//! //assert_eq!(Node::new(3, 2, root.hash), values.root());
+//! let mut query = slate.snapshot().query().unwrap();
+//! assert_eq!("first".as_bytes(), query.get(1).unwrap().unwrap());
+//! assert_eq!("second".as_bytes(), query.get(2).unwrap().unwrap());
+//! assert_eq!("third".as_bytes(), query.get(3).unwrap().unwrap());
 //! ```
 //!
 use crate::cache::Cache;
 use crate::error::Error;
 use crate::error::Error::*;
-use crate::formula::{Model, contains, subnodes_of};
-use crate::serialize::{read_entry_from, read_inodes_from, write_entry_to, write_inodes_to};
+use crate::formula::{Model, contains, root_of, subnodes_of};
+use crate::serialize::{read_entry_from, write_entry_to};
+use crate::storage::file::FileDevice;
+use crate::storage::memory::MemoryDevice;
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Seek, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 pub mod cache;
@@ -118,16 +98,16 @@ impl Display for Node {
 }
 
 /// ハッシュ木に保存されている値を表します。
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Value {
   /// この値のインデックス。
   pub i: Index,
   /// この値のバイナリ値。
-  pub value: Arc<Vec<u8>>,
+  pub value: Vec<u8>,
 }
 
 impl Value {
-  pub fn new(i: Index, value: Arc<Vec<u8>>) -> Value {
+  pub fn new(i: Index, value: Vec<u8>) -> Value {
     Value { i, value }
   }
   /// この値のハッシュ値を算出します。
@@ -202,7 +182,7 @@ impl ValuesWithBranches {
 // --------------------------------------------------------------------------
 
 /// ハッシュ木が使用するハッシュ値です。
-#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[derive(PartialEq, Eq, Copy, Clone)]
 pub struct Hash {
   pub value: [u8; Self::SIZE],
 }
@@ -270,6 +250,12 @@ impl Hash {
 
   pub fn to_str(&self) -> String {
     hex(&self.value)
+  }
+}
+
+impl Debug for Hash {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    write!(f, "Hash({})", hex(&self.value))
   }
 }
 
@@ -376,25 +362,36 @@ impl Serializable for Entry {
   }
 }
 
-pub struct INodes(Index, Vec<INode>);
+enum CachedEntry<'a> {
+  Cached(&'a Entry),
+  Fresh(Entry),
+}
 
-impl Serializable for INodes {
-  fn write<W: Write>(&self, w: &mut W) -> Result<usize> {
-    write_inodes_to(self.0, &self.1, w)
+impl<'a> CachedEntry<'a> {
+  fn into_owned(self) -> Entry {
+    match self {
+      Self::Cached(entry) => entry.clone(),
+      Self::Fresh(entry) => entry,
+    }
   }
-  fn read<R: Read + Seek>(r: &mut R, position: Position) -> Result<Self> {
-    let (index, inodes) = read_inodes_from(r, position)?;
-    Ok(INodes(index, inodes))
+}
+
+impl<'a> AsRef<Entry> for CachedEntry<'a> {
+  fn as_ref(&self) -> &Entry {
+    match self {
+      Self::Cached(ref_data) => ref_data,
+      Self::Fresh(owned_data) => owned_data,
+    }
   }
 }
 
 // --------------------------------------------------------------------------
 
-/// ペイロード (値) の最大バイトサイズを表す定数です。2GB (2,147,483,647 bytes) を表します。
+/// Constant for the maximum byte size of the payload (value), representing 2 GB (2,147,483,647 bytes).
 ///
-/// トレイラーの offset 値を u32 にするためにはエントリの直列化表現を最大でも `u32::MAX` とする必要があります。
-/// したがって任意帳のペイロードは 2GB までとします。この定数はビットマスクとしても使用するため 1-bit の連続で
-/// 構成されている必要があります。
+/// To be the `offset` field to `u32` when serializing entries, the size of the serialized representation of the entry
+/// must be limited to a maximum of [u32::MAX]. Therefore, the maximum payload length is limited to 2 GB. This constant
+/// is also used as a bit mask, so it must be composed of a sequence of 1-bit values.
 ///
 pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
 
@@ -404,6 +401,10 @@ pub struct Snapshot<'a, S: Storage<Entry>> {
 }
 
 impl<'a, S: Storage<Entry>> Snapshot<'a, S> {
+  pub fn root(&self) -> MetaInfo {
+    self.cache.entry(self.revision()).unwrap().root()
+  }
+
   pub fn revision(&self) -> Index {
     self.cache.revision()
   }
@@ -491,15 +492,6 @@ impl<S: Storage<Entry>> Slate<S> {
     &self.storage
   }
 
-  fn load_metadata(storage: &mut S, level: usize) -> Result<(Cache, Position)> {
-    let (latest_entry, position) = storage.boot()?;
-    let cache = match latest_entry {
-      Some(entry) => Cache::load(storage, level, entry)?,
-      None => Cache::empty(level),
-    };
-    Ok((cache, position))
-  }
-
   /// 指定された値をこの Slate に追加します。
   ///
   /// # Returns
@@ -556,8 +548,72 @@ impl<S: Storage<Entry>> Slate<S> {
     Ok(MetaInfo::new(Address::new(i, j, position), root_hash))
   }
 
+  /// Create a snapshot for the current revision.
   pub fn snapshot(&self) -> Snapshot<'_, S> {
     Snapshot { cache: self.cache.clone(), storage: &self.storage }
+  }
+
+  /// Create a snapshot for the specified revision.
+  pub fn snapshot_at(&mut self, revision: Index) -> Result<Snapshot<'_, S>> {
+    let entry = self.load_entry(revision)?.into_owned();
+    let cache = Cache::load(&mut self.storage, self.cache.level(), entry)?;
+    Ok(Snapshot { cache: Arc::new(cache), storage: &self.storage })
+  }
+
+  fn load_metadata(storage: &mut S, level: usize) -> Result<(Cache, Position)> {
+    let (latest_entry, position) = storage.boot()?;
+    let cache = match latest_entry {
+      Some(entry) => Cache::load(storage, level, entry)?,
+      None => Cache::empty(level),
+    };
+    Ok((cache, position))
+  }
+
+  fn load_entry(&self, i: Index) -> Result<CachedEntry<'_>> {
+    if i == 0 || i > self.n() {
+      return Err(Error::InvalidArgument(format!("Entry {} is not contained in the current revision {}", i, self.n())));
+    }
+
+    // the process returns early if the corresponding entry is cached
+    if let Some(entry) = self.cache.entry(i) {
+      return Ok(CachedEntry::Cached(entry));
+    }
+
+    // search for the corresponding entry
+    let mut entry = CachedEntry::Cached(self.cache.entry(self.n()).unwrap());
+    let mut reader = self.storage.reader()?;
+    while entry.as_ref().enode.meta.address.i != i {
+      match entry.as_ref().inodes.iter().find(|inode| contains(inode.left.i, inode.left.j, i)) {
+        Some(inode) => {
+          entry = if let Some(e) = self.cache.entry(inode.left.i) {
+            CachedEntry::Cached(e)
+          } else {
+            CachedEntry::Fresh(read_entry_with_index_check(&mut reader, inode.left.position, inode.left.i)?)
+          };
+        }
+        None => {
+          return Err(Error::InternalStateInconsistency {
+            message: format!("The entry doesn't have a path to {}: {:?}", i, entry.as_ref()),
+          });
+        }
+      }
+    }
+
+    Ok(entry)
+  }
+}
+
+impl Slate<BlockStorage<MemoryDevice>> {
+  pub fn new_on_memory() -> Self {
+    let storage = BlockStorage::memory();
+    Self::new(storage).expect("Memory storage initialization should never fail")
+  }
+}
+
+impl Slate<BlockStorage<FileDevice>> {
+  pub fn new_on_file<P: AsRef<Path>>(path: P, read_only: bool) -> Result<Self> {
+    let storage = BlockStorage::from_file(path, read_only)?;
+    Self::new(storage)
   }
 }
 
@@ -569,10 +625,149 @@ pub enum WalkDirection {
   Terminate,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Prove {
+  Identical,
+  Divergent(Vec<(Index, u8)>),
+}
+
+/// The authentication path to a specific leaf in a specific revision.
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AuthPath {
-  pub value: Value,
-  pub path: Vec<Node>,
+  pub revision: Index,
+  pub leaf: Value,
+  pub witnesses: HashMap<(Index, u8), Hash>,
+}
+
+impl AuthPath {
+  fn new(revision: Index, leaf: Value, witnesses: HashMap<(Index, u8), Hash>) -> Self {
+    AuthPath { revision, leaf, witnesses }
+  }
+
+  /// Calculates the root hash from this authentication path and returns it.
+  /// This returns an error if the authentication path structure is invalid.
+  pub fn root_hash(&self) -> Result<Hash> {
+    let (i, j) = root_of(self.revision);
+    self.compute_hash(i, j)
+  }
+
+  fn compute_hash(&self, i: Index, j: u8) -> Result<Hash> {
+    if j == 0 {
+      if self.leaf.i == i {
+        Ok(self.leaf.hash())
+      } else {
+        Err(Error::AuthPathVerificationFailed(format!(
+          "The authentication path structure is incorrect: This path is for b_{}, but b_{} is stored",
+          i, self.leaf.i
+        )))
+      }
+    } else {
+      let ((il, jl), (ir, jr)) = subnodes_of(i, j);
+      if contains(il, jl, self.leaf.i) {
+        let left = self.compute_hash(il, jl)?;
+        let right = self.witnesses.get(&(ir, jr)).unwrap();
+        Ok(left.combine(right))
+      } else if contains(ir, jr, self.leaf.i) {
+        let left = self.witnesses.get(&(il, jl)).unwrap();
+        let right = self.compute_hash(ir, jr)?;
+        Ok(left.combine(&right))
+      } else {
+        Err(Error::AuthPathVerificationFailed(format!(
+          "The authentication path structure is incorrect: The leaf node b_{} is not contained",
+          self.leaf.i
+        )))
+      }
+    }
+  }
+
+  /// Compare the two authentication paths and confirm that the Merkle trees that generated them are the same.
+  /// If they don't match, collect the positions of intermediate or leaf node containing the mismatched leaves and
+  /// return [Prove::Divergent].
+  ///
+  /// This feature can be used to narrow down and identify the differing leaves between two Merkle trees as follows:
+  ///
+  /// ```
+  /// use slate::{Slate, Prove};
+  /// use slate::formula::contains;
+  ///
+  /// // Craete two data sequences with different values for i=199.
+  /// let mut server = Slate::new_on_memory();
+  /// let mut client = Slate::new_on_memory();
+  /// for i in 1u32..=256 {
+  ///   server.append(&i.to_le_bytes()).unwrap();
+  ///   client.append(&(if i != 199 { i.to_le_bytes() } else { i.to_be_bytes() })).unwrap();
+  /// }
+  /// assert_ne!(client.root(), server.root());
+  ///
+  /// let revision = client.n();
+  /// let mut i = revision;       // the initial value can be any available index
+  /// let mut interactions = 0;
+  /// let proved_index = loop {
+  ///   // First, the client creates an authentication path to the index containing the difference.
+  ///   let snapshot = client.snapshot_at(revision).unwrap();
+  ///   let mut query = snapshot.query().unwrap();
+  ///   let auth_path = query.get_auth_path(i).unwrap().unwrap();
+  ///   // Here, the client sends the authentication path to the server.
+  ///   interactions += 1;
+  ///
+  ///   // Next, the server identifies nodes containing differences from the received authentication path.
+  ///   let snapshot = server.snapshot_at(auth_path.revision).unwrap();
+  ///   let mut query = snapshot.query().unwrap();
+  ///   let server_auth_path = query.get_auth_path(auth_path.leaf.i).unwrap().unwrap();
+  ///   match server_auth_path.prove(&auth_path).unwrap() {
+  ///     Prove::Divergent(diffs) => {
+  ///       // NOTE: In this example, only one node detected because there is only one difference in leaves, but if
+  ///       // there are differences in multiple leaves, there will be multiple nodes.
+  ///       assert_eq!(1, diffs.len());
+  ///       let (di, dj) = diffs[0];
+  ///       assert!(contains(di, dj, 199));   // the detected nodes should contain the differences
+  ///       if dj == 0 {                      // found the leaf with a difference
+  ///         break di;
+  ///       }
+  ///       i = di;
+  ///     }
+  ///     Prove::Identical => panic!(),
+  ///   }
+  ///   // Here, the server responds to the client with the nodes that detected the difference.
+  /// };
+  /// println!("a difference detected after {interactions} interactions."); // 4 interactions
+  /// assert_eq!(199, proved_index);
+  /// ```
+  pub fn prove(&self, other: &AuthPath) -> Result<Prove> {
+    if self.revision != other.revision {
+      return Err(Error::AuthPathVerificationFailed(format!(
+        "The revisions being compared are different: {} != {}",
+        self.revision, other.revision
+      )));
+    } else if self.leaf.i != other.leaf.i {
+      return Err(Error::AuthPathVerificationFailed(format!(
+        "The different authentication path between {} and {} in revisions {} cannot be compared",
+        self.leaf.i, other.leaf.i, self.revision
+      )));
+    }
+
+    // Note that the structure of both authentication paths is verified to be correct by calculating the root hash.
+    if self.root_hash()? == other.root_hash()? {
+      return Ok(Prove::Identical);
+    }
+
+    let mut divergents = Vec::with_capacity(self.witnesses.len());
+    for ((i, j), h1) in self.witnesses.iter() {
+      if let Some(h2) = other.witnesses.get(&(*i, *j)) {
+        if h1 != h2 {
+          divergents.push((*i, *j));
+        }
+      } else {
+        panic!("{self:?} != {other:?}");
+      }
+    }
+    if self.leaf.hash() != other.leaf.hash() {
+      divergents.push((self.leaf.i, 0));
+    }
+    divergents.sort();
+    divergents.reverse();
+    Ok(Prove::Divergent(divergents))
+  }
 }
 
 pub struct Query {
@@ -581,15 +776,49 @@ pub struct Query {
 }
 
 impl Query {
-  /// このクエリーが対象としている木構造の版 (世代、スナップショットに相当) を参照します。
+  /// Refers to the revison (equivalent to a generation or snapshot) of the tree structure that this query is targeting.
   pub fn revision(&self) -> Index {
     self.cache.revision()
   }
 
-  pub fn walk_down<F, E>(&mut self, callback: &mut F) -> Result<()>
+  /// Traverse from the root to the leaves using the specified direction indicator for this query snapshot.
+  /// The direction indicator can capture values during the movement process.
+  ///
+  /// # Examples
+  ///
+  /// ```
+  /// use slate::{BlockStorage, Slate, WalkDirection};
+  ///
+  /// let storage = BlockStorage::memory();
+  /// let mut db = Slate::new(storage).unwrap();
+  /// db.append(&[0u8]).unwrap();
+  /// db.append(&[1u8]).unwrap();
+  /// db.append(&[2u8]).unwrap();
+  /// db.append(&[3u8]).unwrap();
+  /// db.append(&[4u8]).unwrap();
+  /// let snapshot = db.snapshot();
+  /// let mut query = snapshot.query().unwrap();
+  ///
+  /// // Always move to the left from the root towards the leaves.
+  /// // 5: (5, 3) None
+  /// // 5: (4, 2) None
+  /// // 5: (2, 1) None
+  /// // 5: (1, 0) Some([0])
+  /// let mut leaf = None;
+  /// query.walk_down(&mut |revision, i, j, hash, value: Option<&[u8]>| {
+  ///   println!("{revision}: ({i}, {j}) {value:?}");
+  ///   if j == 0 {
+  ///     leaf = value.map(|a| a.to_vec());
+  ///     WalkDirection::Terminate
+  ///   } else {
+  ///     WalkDirection::Left
+  ///   }
+  /// }).unwrap();
+  /// assert_eq!(vec![0u8], leaf.unwrap());
+  /// ```
+  pub fn walk_down<F>(&mut self, callback: &mut F) -> Result<()>
   where
-    F: FnMut(Index, Index, u8, &Hash, Option<&[u8]>) -> std::result::Result<WalkDirection, E>,
-    E: std::error::Error + 'static,
+    F: FnMut(Index, Index, u8, &Hash, Option<&[u8]>) -> WalkDirection,
   {
     let cache = self.cache.clone();
     if let Some(last_entry) = cache.last_entry() {
@@ -600,10 +829,9 @@ impl Query {
     }
   }
 
-  fn _walk_down<F, E>(&mut self, node_index: usize, entry: &Entry, callback: &mut F) -> Result<()>
+  fn _walk_down<F>(&mut self, node_index: usize, entry: &Entry, callback: &mut F) -> Result<()>
   where
-    F: FnMut(Index, Index, u8, &Hash, Option<&[u8]>) -> std::result::Result<WalkDirection, E>,
-    E: std::error::Error + 'static,
+    F: FnMut(Index, Index, u8, &Hash, Option<&[u8]>) -> WalkDirection,
   {
     let i = entry.enode.meta.address.i;
     let (j, hash, value) = if node_index == 0 {
@@ -614,7 +842,7 @@ impl Query {
       (node.meta.address.j, &node.meta.hash, None)
     };
 
-    let dir = (callback)(self.revision(), i, j, hash, value.map(|v| &**v)).map_err(|e| Error::WalkDown(Box::new(e)))?;
+    let dir = (callback)(self.revision(), i, j, hash, value.map(|v| &**v));
 
     // terminate when a leaf node visited or a stop requested
     if node_index == 0 || dir == WalkDirection::Terminate {
@@ -626,7 +854,12 @@ impl Query {
     }
     if dir == WalkDirection::Left || dir == WalkDirection::Both {
       let current = &entry.inodes[node_index - 1];
-      let left = read_entry_with_index_check(&mut self.cursor, current.left.position, current.left.i)?;
+      let left = if let Some(left_entry) = self.cache.entry(current.left.i) {
+        // TODO Is there a way to use cached entries without cloning them?
+        left_entry.clone()
+      } else {
+        read_entry_with_index_check(&mut self.cursor, current.left.position, current.left.i)?
+      };
       debug_assert_eq!(current.left.i, left.enode.meta.address.i);
       debug_assert!(left.enode.meta.address.i < i);
       let left_j = current.left.j;
@@ -657,30 +890,47 @@ impl Query {
     if i == 0 || i > self.cache.revision() {
       return Ok(None);
     }
-    let mut value = None;
+    let mut result = Ok(None);
     self.walk_down(&mut |_n, b_i, b_j, _hash, leaf_value: Option<&[u8]>| {
       if b_i == i {
         if b_j == 0 {
           if let Some(v) = leaf_value {
-            value = Some(v.to_vec());
-            Ok(WalkDirection::Terminate)
+            result = Ok(Some(v.to_vec()));
           } else {
-            inconsistency(format!("The value was not passed at the leaf node b_{b_i} reached"))
+            result = inconsistency(format!("The value was not passed at the leaf node b_{b_i} reached"))
           }
+          WalkDirection::Terminate
         } else {
-          Ok(WalkDirection::Right)
+          WalkDirection::Right
         }
       } else {
         let ((_il, _jl), (ir, jr)) = subnodes_of(b_i, b_j);
-        if contains(ir, jr, i) { Ok(WalkDirection::Right) } else { Ok(WalkDirection::Left) }
+        if contains(ir, jr, i) { WalkDirection::Right } else { WalkDirection::Left }
       }
     })?;
-    Ok(value)
+    result
   }
 
   // 指定されたデータ b_i とその認証パスを取得します。
-  pub fn get_authentication_path(&mut self, _i: Index) -> Result<Option<AuthPath>> {
-    unimplemented!()
+  pub fn get_auth_path(&mut self, i: Index) -> Result<Option<AuthPath>> {
+    let mut witnesses = HashMap::new();
+    let mut leaf_data = None;
+    self.walk_down(&mut |_n, bi, bj, hash, value| {
+      if !contains(bi, bj, i) {
+        witnesses.insert((bi, bj), *hash);
+        WalkDirection::Terminate
+      } else if bj == 0 {
+        leaf_data = value.map(|x| x.to_vec());
+        WalkDirection::Terminate
+      } else {
+        WalkDirection::Both
+      }
+    })?;
+    Ok(leaf_data.map(|data| {
+      let revision = self.revision();
+      let leaf = Value { i, value: data };
+      AuthPath::new(revision, leaf, witnesses)
+    }))
   }
 
   // 指定された範囲 [i0, i1] (両端を含む) のエントリを取得します。

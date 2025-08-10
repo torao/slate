@@ -2,7 +2,7 @@ use crate::checksum::hasher;
 use crate::formula::Model;
 use crate::storage::{read_data, write_data};
 use crate::test::{random_payload, temp_file, verify_storage_spec};
-use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, INodes, Index, MetaInfo, Result, Serializable};
+use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, Index, MetaInfo, Result, Serializable};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::remove_file;
 use std::hash::Hasher;
@@ -23,13 +23,8 @@ fn entry_serialization() -> Result<()> {
 
     let expected = entry;
 
-    // 中間ノードのみを読み出して同一かを確認
-    let mut cursor = io::Cursor::new(buffer.clone());
-    let INodes(index, inodes) = INodes::read(&mut cursor, 0)?;
-    assert_eq!(expected.enode.meta.address.i, index);
-    assert_eq!(expected.inodes, inodes);
-
     // エントリ全体を読み出して同一かを確認
+    let mut cursor = io::Cursor::new(buffer.clone());
     cursor.set_position(0);
     let actual = Entry::read(&mut cursor, 0)?;
     assert_eq!(expected, actual);

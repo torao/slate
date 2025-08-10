@@ -117,6 +117,10 @@ impl Cache {
     self.cache.is_empty()
   }
 
+  pub fn level(&self) -> usize {
+    self.level
+  }
+
   // Refer to the cached entry.
   pub fn entry(&self, i: Index) -> Option<&Entry> {
     self.cache.get(&i).map(|e| e.as_ref())

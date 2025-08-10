@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::iter::FromIterator;
 
-use crate::formula::{Addr, Model, Path, Step, ceil_log2, floor_log2, is_valid, root_of, subnodes_of};
+use crate::formula::{Addr, Model, ceil_log2, floor_log2, is_valid, root_of, subnodes_of, total_nodes};
 use crate::{INDEX_SIZE, Index};
 
 #[test]
@@ -97,59 +97,29 @@ fn model_root() {
 }
 
 #[test]
-fn model_path_to() {
-  let path = |i: u64, steps: Vec<((Index, u8), (Index, u8))>| -> Path {
-    let steps =
-      steps.iter().map(|s| Step { step: Addr::new(s.0.0, s.0.1), neighbor: Addr::new(s.1.0, s.1.1) }).collect();
-    Path { root: Addr::new(i, ceil_log2(i)), steps }
-  };
-  let mut cases = vec![
-    (2, (1, 0), path(2, vec![((1, 0), (2, 0))])),
-    (2, (2, 0), path(2, vec![((2, 0), (1, 0))])),
-    (3, (2, 1), path(3, vec![((2, 1), (3, 0))])),
-    (3, (3, 0), path(3, vec![((3, 0), (2, 1))])),
-    (3, (1, 0), path(3, vec![((2, 1), (3, 0)), ((1, 0), (2, 0))])),
-    (3, (2, 0), path(3, vec![((2, 1), (3, 0)), ((2, 0), (1, 0))])),
-    (13, (1, 0), path(13, vec![((8, 3), (13, 3)), ((4, 2), (8, 2)), ((2, 1), (4, 1)), ((1, 0), (2, 0))])),
-    (13, (6, 0), path(13, vec![((8, 3), (13, 3)), ((8, 2), (4, 2)), ((6, 1), (8, 1)), ((6, 0), (5, 0))])),
-    (13, (13, 3), path(13, vec![((13, 3), (8, 3))])),
-    (13, (13, 0), path(13, vec![((13, 3), (8, 3)), ((13, 0), (12, 2))])),
-  ];
-  cases.append(ns().map(|i| (i, (i, ceil_log2(i)), path(i, vec![]))).collect::<Vec<(u64, (u64, u8), Path)>>().as_mut());
-  for (n, (i, j), expected) in cases {
-    let generation = Model::new(n);
-    let actual = generation.path_to(i, j).unwrap();
-    assert_eq!(expected, actual)
+fn verify_total_nodes() {
+  let expecteds = [0u128, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31];
+  for (n, expected) in expecteds.iter().enumerate() {
+    assert_eq!(*expected, total_nodes(n as Index), "{n} {expected}");
   }
 
-  // 範囲外の中間ノードを指定した場合
-  for (n, j) in [(1, 1), (1, 2), (2, 2), (3, 3), (4, 3)] {
-    let generation = Model::new(n);
-    assert_eq!(None, generation.path_to(n, j));
+  // compare with structurally counted value
+  fn _total_count_rec(i: Index, j: u8) -> u128 {
+    if j == 0 {
+      1
+    } else {
+      let ((il, jl), (ir, jr)) = subnodes_of(i, j);
+      1 + _total_count_rec(il, jl) + _total_count_rec(ir, jr)
+    }
+  }
+  for n in 1..=256 {
+    let (i, j) = root_of(n);
+    let expected = _total_count_rec(i, j);
+    assert_eq!(expected, total_nodes(n));
   }
 
-  // 存在しない一過性の中間ノードを指定した場合
-  for (n, j) in vec![
-    (3, 1),
-    (5, 1),
-    (5, 2),
-    (6, 2),
-    (7, 1),
-    (9, 1),
-    (9, 2),
-    (9, 3),
-    (10, 2),
-    (10, 3),
-    (11, 1),
-    (11, 3),
-    (13, 1),
-    (13, 2),
-    (14, 2),
-    (15, 1),
-  ] {
-    let generation = Model::new(n);
-    assert_eq!(None, generation.path_to(n, j));
-  }
+  // boundary condition
+  assert_eq!(Index::MAX as u128 * 2 - 1, total_nodes(Index::MAX));
 }
 
 #[test]
