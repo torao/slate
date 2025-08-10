@@ -6,26 +6,11 @@ use std::ops::RangeInclusive;
 #[cfg(test)]
 mod test;
 
-/// Slate がインデックス i として使用する整数の型です。通常は `u64` を表しています。
-///
-/// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
-/// ことができます。
-///
-#[cfg(not(feature = "small_index"))]
+/// Slate がインデックス i として使用する整数の型です。
 pub type Index = u64;
 
-#[cfg(feature = "small_index")]
-pub type Index = u32;
-
 /// [`Index`] 型のビット幅です。定数 64 を表しています。
-///
-/// コンパイル時に `small_index` feature を指定することでこの定数は 32 となります。
-///
-#[cfg(not(feature = "small_index"))]
 pub const INDEX_SIZE: u8 = 64;
-
-#[cfg(feature = "small_index")]
-pub const INDEX_SIZE: u8 = 32;
 
 /// Slate のアルゴリズムで使用する任意のノード b_{i,j} を表すための構造体です。
 ///

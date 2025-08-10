@@ -52,16 +52,9 @@ pub mod test;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// slate がインデックス i として使用する整数の型です。`u64` を表しています。
-///
-/// 64-bit がアプリケーションへの適用に大きすぎる場合 `small_index` feature を指定することで `u32` に変更する
-/// ことができます。
-///
 pub type Index = formula::Index;
 
 /// [`Index`] 型のビット幅を表す定数です。64 を表しています。
-///
-/// コンパイル時に `small_index` feature を指定することでこの定数は 32 となります。
-///
 pub const INDEX_SIZE: u8 = formula::INDEX_SIZE;
 
 /// ハッシュ木を構成するノードを表します。

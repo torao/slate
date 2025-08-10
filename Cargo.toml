@@ -31,7 +31,6 @@ sha512_224 = []
 sha512_256 = []
 blake3 = ["dep:blake3"]
 panic_over_inconsistency = []
-small_index = []
 
 [[bench]]
 name = "slate"
