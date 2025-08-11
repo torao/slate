@@ -97,6 +97,28 @@ fn test_bootstrap() {
   }
 }
 
+#[test]
+fn can_resume_from_saved_data() {
+  let buffer = Arc::new(RwLock::new(Vec::new()));
+  for n in 1..=256 {
+    let storage = BlockStorage::from_buffer(buffer.clone(), false);
+    let mut db = Slate::new(storage).unwrap();
+    assert_eq!(n - 1, db.n());
+
+    // read previously saved data
+    let snapshot = db.snapshot();
+    let mut query = snapshot.query().unwrap();
+    assert_eq!(n - 1, query.revision());
+    for i in 1..n {
+      let expected = splitmix64(i).to_le_bytes();
+      assert_eq!(Some(expected.to_vec()), query.get(i).unwrap());
+    }
+
+    // save a new data
+    db.append(&splitmix64(n).to_le_bytes()).unwrap();
+  }
+}
+
 const PAYLOAD_SIZE: usize = 4;
 
 /// データを追加して取得します。

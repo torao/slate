@@ -1,4 +1,4 @@
-use crate::formula::Model;
+use crate::formula::{Model, is_pbst};
 use crate::{Address, Entry, Index, MetaInfo, Reader, Result, Storage, read_entry_with_index_check};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -33,23 +33,36 @@ impl Cache {
     let model = Model::new(i);
     let mut cache = HashMap::new();
 
+    // collect PBST root addresses for the i-generation tree
+    let mut pbst_root_addrs = Vec::with_capacity(last_entry.enode.meta.address.j as usize);
+    for inode in last_entry.inodes.iter().rev() {
+      if !is_pbst(inode.meta.address.i, inode.meta.address.j) {
+        pbst_root_addrs.push(inode.left);
+      } else {
+        pbst_root_addrs.push(inode.meta.address);
+        break;
+      }
+    }
+    if pbst_root_addrs.last().map(|addr| addr.i != i).unwrap_or(true) {
+      pbst_root_addrs.push(last_entry.enode.meta.address);
+    }
+
     // build the cache by reading additional level entries from storage
-    let left_addrs = last_entry.inodes.iter().map(|inode| inode.left).collect::<Vec<_>>();
     cache.insert(last_entry.enode.meta.address.i, Arc::new(last_entry));
     if level > 0 {
       let mut reader = storage.reader()?;
-      Self::load_with_level(&mut reader, level, &left_addrs, &mut cache)?;
+      Self::load_with_level(&mut reader, level, &pbst_root_addrs, &mut cache)?;
     }
 
     let entries = if level == 0 {
       let mut reader = storage.reader()?;
       let mut level1_entries = HashMap::new();
-      Self::load_with_level(&mut reader, 1, &left_addrs, &mut level1_entries)?;
+      Self::load_with_level(&mut reader, 1, &pbst_root_addrs, &mut level1_entries)?;
       Cow::Owned(level1_entries)
     } else {
       Cow::Borrowed(&cache)
     };
-    let pbst_roots = left_addrs
+    let pbst_roots = pbst_root_addrs
       .iter()
       .map(|addr| {
         let meta = if let Some(e) = entries.get(&addr.i) {
@@ -167,7 +180,7 @@ impl Cache {
       meta
     } else {
       // キャッシュの内容が矛盾している
-      panic!("the specified node b_{{{i},{j}}} doesn't exist in the cache")
+      panic!("the specified node b_{{{i},{j}}} doesn't exist in the cache for revison {}: {self:?}", self.revision())
     }
   }
 
