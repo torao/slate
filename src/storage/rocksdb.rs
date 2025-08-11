@@ -2,7 +2,7 @@ use crate::{Error, INDEX_SIZE, Index, Position, Result, Storage};
 use crate::{Reader, Serializable};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rocksdb::DB;
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 use std::sync::{Arc, RwLock};
 
 #[cfg(test)]
@@ -27,23 +27,22 @@ impl RocksDBStorage {
   }
 }
 
-impl<S: Serializable, const M: usize> Storage<S, M> for RocksDBStorage {
-  fn boot(&mut self) -> Result<(Option<S>, Position, Vec<u8>)> {
+impl<S: Serializable> Storage<S> for RocksDBStorage {
+  fn boot(&mut self) -> Result<(Option<S>, Position)> {
     let guard = self.db.write()?;
     match guard.get(&self.key_for_metadata)? {
       Some(value) => {
         let position = Cursor::new(&value[..8]).read_u64::<LittleEndian>()?;
-        let metadata = value[8..].to_vec();
         let key = self.key(position - 1);
         match guard.get(&key)? {
           Some(value) => {
             let data = S::read(&mut Cursor::new(&value), position - 1)?;
-            Ok((Some(data), position, metadata))
+            Ok((Some(data), position))
           }
           None => key_not_found(&key, position),
         }
       }
-      None => Ok((None, 1, vec![0u8; M])),
+      None => Ok((None, 1)),
     }
   }
 
@@ -64,9 +63,7 @@ impl<S: Serializable, const M: usize> Storage<S, M> for RocksDBStorage {
           Cursor::new(&mut value).write_u64::<LittleEndian>(position + 1)?;
           value
         }
-        None => {
-          vec![0u8; M + 8]
-        }
+        None => vec![0u8; 8],
       };
       guard.put(&self.key_for_metadata, meatadata)?;
     }
@@ -78,20 +75,6 @@ impl<S: Serializable, const M: usize> Storage<S, M> for RocksDBStorage {
     let key_prefix = self.key_prefix.clone();
     let key_hashing = self.key_hashing;
     Ok(Box::new(RocksDBReader { db, key_prefix, key_hashing }))
-  }
-  fn flush_metadata(&mut self, metadata: &[u8]) -> Result<()> {
-    let guard = self.db.write()?;
-    let value = match guard.get(&self.key_for_metadata)? {
-      Some(mut value) => {
-        Cursor::new(&mut value[8..]).write_all(metadata)?;
-        value
-      }
-      None => {
-        vec![0u8; M + 8]
-      }
-    };
-    guard.put(&self.key_for_metadata, value)?;
-    Ok(())
   }
 }
 
