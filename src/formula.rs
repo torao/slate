@@ -128,9 +128,9 @@ impl Model {
     let mut pbsts = Vec::<Addr>::with_capacity(capacity);
     while remaining != 0 {
       let j = floor_log2(remaining);
-      let i = n - remaining + (1 << j);
+      let i = n - remaining + pow2e(j);
       pbsts.push(Addr::new(i, j));
-      remaining -= 1 << j;
+      remaining -= pow2e(j);
     }
     pbsts
   }
