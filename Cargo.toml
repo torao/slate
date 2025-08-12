@@ -14,7 +14,7 @@ byteorder = "1"
 highway = "1"
 sha2 = "0.10"
 clap = "4"
-rocksdb = { version = "0.23", optional = true }
+rocksdb = { version = "0.24", optional = true }
 blake3 = { version = "1.8", optional = true }
 
 [dev-dependencies]
