@@ -31,33 +31,40 @@ impl Cache {
   {
     let i = last_entry.enode.meta.address.i;
     let model = Model::new(i);
-    let mut cache = HashMap::new();
 
     // collect PBST root addresses for the i-generation tree
+    let mut pbst_exists_in_inodes = false;
     let mut pbst_root_addrs = Vec::with_capacity(last_entry.enode.meta.address.j as usize);
     for inode in last_entry.inodes.iter().rev() {
       if !is_pbst(inode.meta.address.i, inode.meta.address.j) {
         pbst_root_addrs.push(inode.left);
       } else {
         pbst_root_addrs.push(inode.meta.address);
+        pbst_exists_in_inodes = true;
         break;
       }
     }
-    if pbst_root_addrs.last().map(|addr| addr.i != i).unwrap_or(true) {
+    if !pbst_exists_in_inodes {
       pbst_root_addrs.push(last_entry.enode.meta.address);
     }
 
+    // address of the entry containing the node that can be reached from the latest entry in step 1
+    let level1_addrs = last_entry.inodes.iter().map(|inode| inode.left).collect::<Vec<_>>();
+
     // build the cache by reading additional level entries from storage
-    cache.insert(last_entry.enode.meta.address.i, Arc::new(last_entry));
+    let last_entry = Arc::new(last_entry);
+    let mut cache = HashMap::new();
+    cache.insert(last_entry.enode.meta.address.i, last_entry.clone());
     if level > 0 {
       let mut reader = storage.reader()?;
-      Self::load_with_level(&mut reader, level, &pbst_root_addrs, &mut cache)?;
+      Self::load_with_level(&mut reader, level, &level1_addrs, &mut cache)?;
     }
 
     let entries = if level == 0 {
       let mut reader = storage.reader()?;
       let mut level1_entries = HashMap::new();
-      Self::load_with_level(&mut reader, 1, &pbst_root_addrs, &mut level1_entries)?;
+      level1_entries.insert(last_entry.enode.meta.address.i, last_entry.clone());
+      Self::load_with_level(&mut reader, 1, &level1_addrs, &mut level1_entries)?;
       Cow::Owned(level1_entries)
     } else {
       Cow::Borrowed(&cache)
@@ -68,7 +75,7 @@ impl Cache {
         let meta = if let Some(e) = entries.get(&addr.i) {
           *e.meta(addr.j).unwrap()
         } else {
-          panic!("address ({}, {}) is not in entry collection: {:?}", addr.i, addr.j, entries)
+          panic!("address ({}, {}) is not in entry collection: {entries:?}, n={i}, level={level}", addr.i, addr.j)
         };
         (addr.i, meta)
       })
