@@ -44,6 +44,10 @@ impl FileDevice {
       }
     })
   }
+
+  pub fn path(&self) -> PathBuf {
+    self.path.clone()
+  }
 }
 
 impl BlockDevice for FileDevice {

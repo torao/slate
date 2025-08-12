@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Seek, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 pub mod cache;
 pub(crate) mod checksum;
@@ -599,6 +599,12 @@ impl<S: Storage<Entry>> Slate<S> {
 impl Slate<BlockStorage<MemoryDevice>> {
   pub fn new_on_memory() -> Self {
     let storage = BlockStorage::memory();
+    Self::new(storage).expect("Memory storage initialization should never fail")
+  }
+  pub fn new_on_memory_with_capacity(capacity: usize) -> Self {
+    let buffer = Arc::new(RwLock::new(Vec::with_capacity(capacity)));
+    let device = MemoryDevice::with(buffer, false);
+    let storage = BlockStorage::new(device);
     Self::new(storage).expect("Memory storage initialization should never fail")
   }
 }

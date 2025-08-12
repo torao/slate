@@ -72,6 +72,9 @@ impl<B: BlockDevice> BlockStorage<B> {
     let position = 0;
     BlockStorage { device, position }
   }
+  pub fn device(&self) -> &B {
+    &self.device
+  }
 }
 
 impl BlockStorage<MemoryDevice> {
