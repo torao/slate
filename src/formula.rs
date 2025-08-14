@@ -57,7 +57,7 @@ impl Model {
   /// 時間/空間計算量は O(log n) です。
   pub fn new(n: Index) -> Self {
     debug_assert_ne!(0, n);
-    let pbst_roots = Self::create_pbst_roots(n);
+    let pbst_roots = pbst_roots(n).collect::<Vec<_>>();
     debug_assert_ne!(0, pbst_roots.len());
     let ephemeral_nodes = Self::create_ephemeral_nodes(n, &pbst_roots);
     Self { n, pbst_roots, ephemeral_nodes }
@@ -121,20 +121,6 @@ impl Model {
     INode::new(Addr::new(i, j), Addr::new(i - (1 << (j - 1)), j - 1), Addr::new(i, j - 1))
   }
 
-  /// T_n に含まれる完全二分木のルートノードを構築します。
-  fn create_pbst_roots(n: Index) -> Vec<Addr> {
-    let capacity = ceil_log2(n) as usize;
-    let mut remaining = n;
-    let mut pbsts = Vec::<Addr>::with_capacity(capacity);
-    while remaining != 0 {
-      let j = floor_log2(remaining);
-      let i = n - remaining + pow2e(j);
-      pbsts.push(Addr::new(i, j));
-      remaining -= pow2e(j);
-    }
-    pbsts
-  }
-
   /// 一過性の中間ノードを参照します。
   fn create_ephemeral_nodes(n: Index, pbsts: &[Addr]) -> Vec<INode> {
     debug_assert_ne!(0, pbsts.len());
@@ -154,17 +140,49 @@ impl Model {
   }
 }
 
+/// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを判定します。
+/// true の場合、 b_{i,j} が永続的ノード (以後の世代でも継続して存在するノード) であることも意味します。
+/// すべての葉ノードに対しても true を返します。
+#[inline]
+pub const fn is_pbst(i: Index, j: u8) -> bool {
+  i_mod_2e(i, j) == 0
+}
+
+/// n 個の要素を持つ木構造 𝑇ₙ において、完全二分木がいくつ存在するかを返します。
+/// これは、額面が 2⁰, 2¹, 2², ..., 2^h のコインの合計を、枚数を最小化してぴったり
+///  n にする最小コイン問題問題の一種と考えられます。
+#[inline]
+pub const fn count_pbsts(n: Index) -> u8 {
+  n.count_ones() as u8
+}
+
+/// 木構造 𝑇ₙ に含まれる独立した完全二分木のルートノードを列挙します。
+pub fn pbst_roots(n: Index) -> impl Iterator<Item = Addr> {
+  let mut remaining = n;
+  std::iter::from_fn(move || {
+    if remaining == 0 {
+      return None;
+    }
+    let j = floor_log2(remaining);
+    let size = pow2e(j);
+    let i = n - remaining + size;
+    let root = Addr::new(i, j);
+    remaining -= size;
+    Some(root)
+  })
+}
+
 /// Calculates the total number of nodes in the n-th generation.
 /// The return value includes the number of leaf nodes.
 /// 𝑓:0 → 0, 𝑓:(n) → 2×n-1, 𝑓:(2⁶⁴-1) → (2⁶⁴-1)×2-1
 #[inline]
-pub fn total_nodes(n: Index) -> u128 {
+pub const fn total_nodes(n: Index) -> u128 {
   if n == 0 { 0 } else { 2 * n as u128 - 1 }
 }
 
 /// 任意のノード b_{i,j} をルートとする部分木に含まれる葉ノード b_ℓ の範囲を O(1) で算出します。
 #[inline]
-pub fn range(i: Index, j: u8) -> RangeInclusive<Index> {
+pub const fn range(i: Index, j: u8) -> RangeInclusive<Index> {
   debug_assert!(j <= 64); // i=u64::MAX のとき j=64
   // let i_min = (((i as u128 >> j) - (if is_pbst(i, j) { 1 } else { 0 })) << j) as u64 + 1;
   let i_min = i - i_mod_2e(i - 1, j);
@@ -174,7 +192,7 @@ pub fn range(i: Index, j: u8) -> RangeInclusive<Index> {
 
 /// Calculates the root index b_{i,j} of any generation n in O(1).
 #[inline]
-pub fn root_of(n: Index) -> (Index, u8) {
+pub const fn root_of(n: Index) -> (Index, u8) {
   debug_assert!(n > 0);
   let i = n;
   let j = ceil_log2(n);
@@ -195,7 +213,7 @@ pub fn subnodes_of(i: Index, j: u8) -> ((Index, u8), (Index, u8)) {
 
 /// Determines whether a node b_{i,j} can exist in O(1).
 #[inline]
-pub fn is_valid(i: Index, j: u8) -> bool {
+pub const fn is_valid(i: Index, j: u8) -> bool {
   if i == 0 {
     // 0-th generation doesn't exist
     false
@@ -224,7 +242,7 @@ pub fn is_valid(i: Index, j: u8) -> bool {
 
 /// 任意のノード b_{i,j} をルートとする部分木 T_{i,j} に含まれている葉ノードの数 r_{i,j} を算出します。
 #[inline]
-pub fn leaf_count(i: Index, j: u8) -> Index {
+pub const fn leaf_count(i: Index, j: u8) -> Index {
   i_mod_2e(i - 1, j) + 1
 }
 
@@ -257,10 +275,13 @@ pub fn auth_path_length(n: Index, i: Index) -> u8 {
   if contains(ri, rj, i) { _branch_count(i, ri, rj, 0) } else { 0 }
 }
 
-/// 指定されたノード b_{i,j} をルートとする部分木が完全二分木であるかを判定します。
-#[inline]
-pub fn is_pbst(i: Index, j: u8) -> bool {
-  i_mod_2e(i, j) == 0
+/// n 個の要素を持つ木構造 𝑇ₙ において、最新のエントリ eₙ から指定されたエントリ eᵢ までの距離を計算します。
+/// Slate においては 1 エントリごとに 1 回の I/O Read が発生するため、この関数の返値は n 世代において eᵢ にアクセスするための
+/// コストと見なすことができます。
+pub fn entry_access_distance(k: Index, n: Index) -> Option<u8> {
+  pbst_roots(n)
+    .find(|root| contains(root.i, root.j, k))
+    .map(|root| root.j - (k - range(root.i, root.j).start()).count_ones() as u8 + (root.i != n) as u8)
 }
 
 /// i mod 2^j を算出します。j∈{0,…,64} の値を指定することができます。
@@ -274,7 +295,7 @@ pub fn is_pbst(i: Index, j: u8) -> bool {
 /// assert_eq!(u64::MAX, i_mod_2e(u64::MAX, 64));
 /// ```
 #[inline]
-pub fn i_mod_2e(i: Index, j: u8) -> Index {
+pub const fn i_mod_2e(i: Index, j: u8) -> Index {
   debug_assert!(j <= 64);
   // Typically, j < 64, so branch prediction is effective. If we use 128-bit arithmetic and remove conditional branch,
   // the CPU breaks it down into multiple instructions, which incures casting overhead and is slower than conditional
@@ -293,7 +314,7 @@ pub fn i_mod_2e(i: Index, j: u8) -> Index {
 /// assert_eq!(u64::MAX / 2 + 1, pow2e(63));
 /// ```
 #[inline]
-pub fn pow2e(j: u8) -> Index {
+pub const fn pow2e(j: u8) -> Index {
   debug_assert!(j < 64);
   1u64 << j
 }
@@ -312,7 +333,7 @@ pub fn pow2e(j: u8) -> Index {
 /// assert_eq!(64, ceil_log2(u64::MAX));
 /// ```
 #[inline]
-pub fn ceil_log2(x: Index) -> u8 {
+pub const fn ceil_log2(x: Index) -> u8 {
   debug_assert!(x > 0);
   (INDEX_SIZE as u32 - (x - 1).leading_zeros()) as u8
 }
@@ -330,7 +351,7 @@ pub fn ceil_log2(x: Index) -> u8 {
 /// assert_eq!(63, floor_log2(u64::MAX));
 /// ```
 #[inline]
-pub fn floor_log2(x: Index) -> u8 {
+pub const fn floor_log2(x: Index) -> u8 {
   debug_assert!(x > 0);
   x.ilog2() as u8
 }

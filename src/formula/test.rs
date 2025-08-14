@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::iter::FromIterator;
 
-use crate::formula::{Addr, Model, ceil_log2, floor_log2, is_valid, root_of, subnodes_of, total_nodes};
+use crate::formula::{
+  Addr, Model, ceil_log2, count_pbsts, entry_access_distance, floor_log2, is_valid, pbst_roots, root_of, subnodes_of,
+  total_nodes,
+};
 use crate::{INDEX_SIZE, Index};
 
 #[test]
@@ -97,6 +100,15 @@ fn model_root() {
 }
 
 #[test]
+fn verify_pbst_count() {
+  for n in (1..=1024).chain((Index::MAX - 8)..=Index::MAX) {
+    let expected = pbst_roots(n).count();
+    let actual = count_pbsts(n) as usize;
+    assert_eq!(expected, actual, "n={n}");
+  }
+}
+
+#[test]
 fn verify_total_nodes() {
   let expecteds = [0u128, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31];
   for (n, expected) in expecteds.iter().enumerate() {
@@ -150,6 +162,34 @@ fn calculated_index_of_subnodes() {
   );
 }
 
+#[test]
+fn verify_entry_access_distance() {
+  assert_eq!(None, entry_access_distance(0, 0));
+  assert_eq!(None, entry_access_distance(1, 0));
+  assert_eq!(None, entry_access_distance(0, 1));
+  assert_eq!(Some(0), entry_access_distance(1, 1));
+  assert_eq!(None, entry_access_distance(2, 1));
+  assert_eq!(None, entry_access_distance(0, 2));
+  assert_eq!(Some(1), entry_access_distance(1, 2));
+  assert_eq!(Some(0), entry_access_distance(2, 2));
+  assert_eq!(None, entry_access_distance(3, 2));
+  assert_eq!(None, entry_access_distance(0, 3));
+  assert_eq!(Some(2), entry_access_distance(1, 3));
+  assert_eq!(Some(1), entry_access_distance(2, 3));
+  assert_eq!(Some(0), entry_access_distance(3, 3));
+  assert_eq!(None, entry_access_distance(4, 3));
+  assert_eq!(None, entry_access_distance(0, 4));
+  assert_eq!(Some(2), entry_access_distance(1, 4));
+  assert_eq!(Some(1), entry_access_distance(2, 4));
+  assert_eq!(Some(1), entry_access_distance(3, 4));
+  assert_eq!(Some(0), entry_access_distance(4, 4));
+  assert_eq!(None, entry_access_distance(5, 4));
+  assert_eq!(None, entry_access_distance(0, Index::MAX));
+  assert_eq!(Some(64), entry_access_distance(1, Index::MAX));
+  assert_eq!(Some(63), entry_access_distance(2, Index::MAX));
+  assert_eq!(Some(1), entry_access_distance(Index::MAX - 1, Index::MAX));
+  assert_eq!(Some(0), entry_access_distance(Index::MAX, Index::MAX));
+}
 #[test]
 fn verify_valid_node() {
   // verify using indices obtained through stractural analysis
@@ -331,23 +371,4 @@ fn expected_index_for_roots() -> Vec<(Index, u8)> {
 type SubnodeIndex = ((Index, u8), (Index, u8), (Index, u8));
 fn expected_index_for_subnodes() -> Vec<SubnodeIndex> {
   include!("test_branches.rs")
-}
-
-#[test]
-fn yyy() -> std::result::Result<(), std::io::Error> {
-  use std::fs::File;
-  use std::io::Write;
-  let mut file = File::create("test_nodes.rs").unwrap();
-  writeln!(file, "vec![")?;
-  for n in 1..=256 {
-    let model = Model::new(n);
-    let mut inodes = model.inodes();
-    inodes.reverse();
-    for inode in inodes {
-      writeln!(file, "  ({}, {}),", inode.node.i, inode.node.j)?;
-    }
-    writeln!(file, "  ({n}, 0),")?;
-  }
-  writeln!(file, "]")?;
-  Ok(())
 }
