@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::iter::FromIterator;
+use std::ops::RangeInclusive;
 
 use crate::formula::{
-  Addr, Model, ceil_log2, count_pbsts, entry_access_distance, floor_log2, is_valid, pbst_roots, root_of, subnodes_of,
-  total_nodes,
+  Addr, Model, ceil_log2, count_pbsts, entry_access_distance, entry_access_distance_limits, floor_log2, is_valid,
+  pbst_roots, root_of, subnodes_of, total_nodes,
 };
 use crate::{INDEX_SIZE, Index};
 
@@ -190,6 +191,107 @@ fn verify_entry_access_distance() {
   assert_eq!(Some(1), entry_access_distance(Index::MAX - 1, Index::MAX));
   assert_eq!(Some(0), entry_access_distance(Index::MAX, Index::MAX));
 }
+
+#[test]
+fn verify_entry_access_distance_limit() {
+  for n in 1..=256 {
+    // 上限/下限の範囲を構造的に取得
+    let h = ceil_log2(n);
+    let mut ds_ul = vec![0; h as usize + 1];
+    let mut ds_ll = vec![0; h as usize + 1];
+    for i in 1..=n {
+      let d = entry_access_distance(i, n).unwrap() as usize;
+      ds_ul[d] = i;
+      if ds_ll[d] == 0 {
+        ds_ll[d] = i;
+      }
+    }
+
+    //
+    let (ul, ll) = entry_access_distance_limits(n);
+
+    assert_eq!(ds_ul.len(), ul.len());
+    for d in 0..ds_ul.len() {
+      assert_eq!(ds_ul[d], *ul[d].end(), "{d}: {ds_ul:?} <> {ul:?}");
+      if d > 0 {
+        assert_eq!(*ul[d].end(), *ul[d - 1].start() - 1)
+      }
+    }
+    assert_eq!(Some(RangeInclusive::new(1, 1)), ul.last().cloned());
+    assert_eq!(Some(RangeInclusive::new(n, n)), ul.first().cloned());
+
+    assert_eq!(ds_ll.len(), ll.len());
+    for d in 0..ds_ll.len() {
+      assert_eq!(ds_ll[d], *ll[d].start(), "{d}: {ds_ll:?} <> {ll:?}");
+      if d > 0 {
+        assert_eq!(*ll[d].end(), *ll[d - 1].start() - 1, "{d}: {ll:?}")
+      }
+    }
+    assert_eq!(Some(RangeInclusive::new(1, 1)), ll.last().cloned());
+    assert_eq!(Some(RangeInclusive::new(n, n)), ll.first().cloned());
+  }
+
+  // 境界値
+  entry_access_distance_limits(0);
+  entry_access_distance_limits(Index::MAX);
+}
+
+#[test]
+fn calculate_worst() {
+  use rayon::prelude::*;
+  // アクセス距離 d が 1)最初に出現したインデックス = 最悪ケース、2)最後に出現したインデックス = 最良ケース、とする。
+  const N: u64 = u16::MAX as Index + 1;
+  const L: usize = ceil_log2(N) as usize + 1;
+  let (first_to_appear, last_to_appear) = (1..=N)
+    .into_par_iter()
+    .map(|k| {
+      let d = entry_access_distance(k, N).unwrap() as usize;
+      (d, k)
+    })
+    .fold(
+      || (vec![None; L], vec![None; L]),
+      |(mut first, mut last), (d, k)| {
+        match first[d] {
+          None => first[d] = Some(k),
+          Some(v) if k < v => first[d] = Some(k),
+          _ => (),
+        }
+        match last[d] {
+          None => last[d] = Some(k),
+          Some(v) if k > v => last[d] = Some(k),
+          _ => (),
+        }
+        (first, last)
+      },
+    )
+    .reduce(
+      || (vec![None; L], vec![None; L]),
+      |(mut f1, mut l1), (f2, l2)| {
+        for i in 0..L {
+          f1[i] = match (f1[i], f2[i]) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(a.min(b)),
+          };
+          l1[i] = match (l1[i], l2[i]) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(a.max(b)),
+          };
+        }
+        (f1, l1)
+      },
+    );
+  println!("data1 = [");
+  for (j, i) in first_to_appear.iter().enumerate() {
+    println!("  ({}, {}),", N - i.unwrap() + 1, j);
+  }
+  println!("]");
+  println!("data2 = [");
+  for (j, i) in last_to_appear.iter().enumerate() {
+    println!("  ({}, {}),", N - i.unwrap() + 1, j);
+  }
+  println!("]");
+}
+
 #[test]
 fn verify_valid_node() {
   // verify using indices obtained through stractural analysis

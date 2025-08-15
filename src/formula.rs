@@ -284,6 +284,67 @@ pub fn entry_access_distance(k: Index, n: Index) -> Option<u8> {
     .map(|root| root.j - (k - range(root.i, root.j).start()).count_ones() as u8 + (root.i != n) as u8)
 }
 
+/// n 個の要素を持つ木構造 𝑇ₙ において、最新のエントリ eₙ からデータ列の任意の位置までの距離の上限と下限の範囲を
+/// (upper-limit-range, lower-limit-range) で返します。
+pub fn entry_access_distance_limits(n: Index) -> (Vec<RangeInclusive<Index>>, Vec<RangeInclusive<Index>>) {
+  if n == 0 {
+    return (Vec::new(), Vec::new());
+  }
+  let h = ceil_log2(n);
+  let roots = pbst_roots(n).collect::<Vec<_>>();
+
+  let ds_ll = vec![RangeInclusive::new(n, n)]
+    .into_iter()
+    .chain(
+      roots
+        .first()
+        .map(|root| {
+          let h = root.j;
+          let mut ds_ll = (0..=h).map(|d| pow2e(h - d)).collect::<Vec<_>>();
+          if roots.len() > 1 {
+            ds_ll.insert(0, n);
+          }
+          ds_ll
+        })
+        .unwrap_or(Vec::new())
+        .windows(2)
+        .map(|w| RangeInclusive::new(w[1], w[0] - 1)),
+    )
+    .collect::<Vec<_>>();
+
+  let ds_ul = roots
+    .iter()
+    .rev()
+    .enumerate()
+    .map(|(x, root)| {
+      let right_most_pbst = x == 0;
+      let h = root.j;
+      let n = pow2e(h);
+      let offset = *range(root.i, root.j).start() - 1;
+      let mut ds_ul = Vec::with_capacity(h as usize);
+      if !right_most_pbst {
+        ds_ul.push(0);
+      }
+      for d in 0..=h {
+        ds_ul.push(offset + (n + 1 - pow2e(d))); // Be aware of overflow due to order of operations
+      }
+      ds_ul
+    })
+    .fold(vec![0; h as usize + 1], |mut acc, ul| {
+      for d in 0..ul.len() {
+        if acc[d] == 0 {
+          acc[d] = ul[d];
+        }
+      }
+      acc
+    })
+    .windows(2)
+    .map(|w| RangeInclusive::new(w[1] + 1, w[0]))
+    .chain(vec![RangeInclusive::new(1, 1)])
+    .collect::<Vec<_>>();
+  (ds_ul, ds_ll)
+}
+
 /// i mod 2^j を算出します。j∈{0,…,64} の値を指定することができます。
 ///
 /// ```
