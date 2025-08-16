@@ -181,22 +181,21 @@ pub struct Hash {
 }
 
 impl Hash {
-  #[cfg(feature = "highwayhash64")]
-  pub const SIZE: usize = 8;
-
-  #[cfg(any(feature = "sha224", feature = "sha512_224"))]
-  pub const SIZE: usize = 28;
-
-  /// [`Hash::hash()`] によって得られるハッシュ値のバイトサイズを表す定数です。デフォルトの `feature = "sha256"`
-  /// ビルドでは 32 を表します。
-  #[cfg(any(feature = "sha256", feature = "sha512_256"))]
-  pub const SIZE: usize = 32;
-
-  #[cfg(feature = "sha512")]
-  pub const SIZE: usize = 64;
-
-  #[cfg(feature = "blake3")]
-  pub const SIZE: usize = blake3::OUT_LEN;
+  pub const SIZE: usize = if cfg!(feature = "blake3") {
+    blake3::OUT_LEN
+  } else if cfg!(feature = "sha512") {
+    64
+  } else if cfg!(any(feature = "sha256", feature = "sha512_256")) {
+    32
+  } else if cfg!(any(feature = "sha224", feature = "sha512_224")) {
+    28
+  } else if cfg!(feature = "highwayhash64") {
+    8
+  } else {
+    // Use if cfg!() instead of #[cfg()] to avoid compilation errors and ensure that the strongest algorithm is
+    // selected in specifying --all-features.
+    panic!("No hash algorithm is specified. At least one hash algorithm must be specified as a feature.")
+  };
 
   pub fn new(hash: [u8; Self::SIZE]) -> Hash {
     Hash { value: hash }
@@ -204,32 +203,35 @@ impl Hash {
 
   /// 指定された値をハッシュ化します。
   pub fn from_bytes(value: &[u8]) -> Hash {
-    #[cfg(feature = "blake3")]
-    {
-      let mut hash = [0u8; Hash::SIZE];
-      (&mut hash[..]).write_all(blake3::hash(value).as_bytes()).unwrap();
-      Hash::new(hash)
-    }
-    #[cfg(all(not(feature = "blake3"), feature = "highwayhash64"))]
-    {
-      let mut builder = HighwayBuilder::default();
-      builder.write_all(value).unwrap();
-      Hash::new(builder.finalize64().to_le_bytes())
-    }
-    #[cfg(all(not(feature = "blake3"), not(feature = "highwayhash64")))]
-    {
+    if cfg!(feature = "blake3") {
+      blake3::hash(value).as_bytes().into()
+    } else if cfg!(feature = "sha512") {
       use sha2::Digest;
-      #[cfg(feature = "sha256")]
-      use sha2::Sha256 as Sha2;
-      #[cfg(feature = "sha512_224")]
-      use sha2::Sha512Trunc224 as Sha2;
-      #[cfg(feature = "sha512_256")]
-      use sha2::Sha512Trunc256 as Sha2;
-      let output = Sha2::digest(value);
-      debug_assert_eq!(Hash::SIZE, output.len());
-      let mut hash = [0u8; Hash::SIZE];
-      (&mut hash[..]).write_all(&output).unwrap();
-      Hash::new(hash)
+      let hash: [u8; 64] = sha2::Sha512::digest(value).into();
+      (&hash).into()
+    } else if cfg!(feature = "sha256") {
+      use sha2::Digest;
+      let hash: [u8; 32] = sha2::Sha256::digest(value).into();
+      (&hash).into()
+    } else if cfg!(feature = "sha512_256") {
+      use sha2::Digest;
+      let hash: [u8; 32] = sha2::Sha512_256::digest(value).into();
+      (&hash).into()
+    } else if cfg!(feature = "sha224") {
+      use sha2::Digest;
+      let hash: [u8; 28] = sha2::Sha224::digest(value).into();
+      (&hash).into()
+    } else if cfg!(feature = "sha512_224") {
+      use sha2::Digest;
+      let hash: [u8; 28] = sha2::Sha512_224::digest(value).into();
+      (&hash).into()
+    } else if cfg!(feature = "highwayhash64") {
+      use highway::HighwayHash;
+      let mut builder = highway::HighwayHasher::default();
+      builder.write_all(value).unwrap();
+      (&builder.finalize64().to_le_bytes()).into()
+    } else {
+      panic!()
     }
   }
 
@@ -243,6 +245,19 @@ impl Hash {
 
   pub fn to_str(&self) -> String {
     hex(&self.value)
+  }
+}
+
+impl<const S: usize> From<&[u8; S]> for Hash {
+  fn from(hash: &[u8; S]) -> Self {
+    if S == Hash::SIZE {
+      unsafe {
+        let ptr = hash as *const [u8; S] as *const [u8; Hash::SIZE];
+        Hash::new(*ptr)
+      }
+    } else {
+      panic!();
+    }
   }
 }
 

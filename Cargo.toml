@@ -9,13 +9,13 @@ edition = "2024"
 [dependencies]
 log = "0.4"
 log4rs = "1"
-thiserror = "2"
+thiserror = "2.0"
 byteorder = "1"
 highway = "1"
 sha2 = "0.10"
-clap = "4"
+clap = "4.5"
 rocksdb = { version = "0.24", optional = true }
-blake3 = { version = "1.8", optional = true }
+blake3 = "1.8"
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
@@ -30,7 +30,7 @@ sha256 = []
 sha512 = []
 sha512_224 = []
 sha512_256 = []
-blake3 = ["dep:blake3"]
+blake3 = []
 panic_over_inconsistency = []
 
 [[bench]]
