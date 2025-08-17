@@ -27,9 +27,14 @@ pub trait Serializable: Sized {
 
 /// ハッシュツリーのデータを保存するために抽象化されたストレージです。
 pub trait Storage<S: Serializable> {
+  /// 先頭に位置するデータとその位置を返します。
+  /// ストレージにまだデータが保存されていない場合は None を返します。
+  /// 通常は使用されず、データストアのメンテナンスやデバッグ用に用意しています。
+  fn first(&mut self) -> Result<(Option<S>, Position)>;
+
   /// 起動時に呼び出され、現在のデータと、次のデータの位置を返します。
   /// ストレージにまだデータが保存されていない場合は None を返します。
-  fn boot(&mut self) -> Result<(Option<S>, Position)>;
+  fn last(&mut self) -> Result<(Option<S>, Position)>;
 
   /// 指定された位置にデータの保存します。
   /// 次のデータの位置を返します。
@@ -113,13 +118,21 @@ impl<B: BlockDevice + 'static, S: Serializable> Storage<S> for BlockStorage<B> {
     Ok(Box::new(device))
   }
 
-  fn boot(&mut self) -> Result<(Option<S>, Position)> {
-    let (data, position) = boot(&mut self.device)?;
+  fn first(&mut self) -> Result<(Option<S>, Position)> {
+    let (first, _) = boot(&mut self.device)?;
+    Ok(first)
+  }
+
+  fn last(&mut self) -> Result<(Option<S>, Position)> {
+    let (_, (data, position)) = boot(&mut self.device)?;
     self.position = position;
     Ok((data, position))
   }
 
   fn put(&mut self, position: Position, data: &S) -> Result<Position> {
+    if self.position != position {
+      self.position = self.device.seek(SeekFrom::Start(position))?;
+    }
     debug_assert_eq!(self.position, position);
     let mut bw = BufWriter::new(&mut self.device);
     let length = write_data(&mut bw, data)?;
@@ -143,7 +156,9 @@ pub(crate) fn is_version_compatible(version: u8) -> bool {
   version <= STORAGE_VERSION
 }
 
-fn boot<C, S: Serializable>(cursor: &mut C) -> Result<(Option<S>, Position)>
+type FirstLast<S> = ((Option<S>, Position), (Option<S>, Position));
+
+fn boot<C, S: Serializable>(cursor: &mut C) -> Result<FirstLast<S>>
 where
   C: Write + Read + Seek,
 {
@@ -167,10 +182,18 @@ where
     }
   }
 
+  let first_position = cursor.stream_position()?;
   let next_position = cursor.seek(SeekFrom::End(0))?;
-  let latest_entry = if next_position == 4 {
-    None
-  } else {
+  if next_position == first_position {
+    return Ok(((None, first_position), (None, next_position)));
+  }
+  let first_entry = {
+    cursor.seek(SeekFrom::Start(first_position))?;
+    Some(read_data(cursor, first_position)?)
+  };
+
+  cursor.seek(SeekFrom::End(0))?;
+  let latest_entry = {
     // 末尾のデータを読み込み
     back_to_safety(cursor, 4 /* offset */ + 8 /* checksum */, "The first data is corrupted.")?;
     let offset = cursor.read_u32::<LittleEndian>()?;
@@ -191,7 +214,7 @@ where
     Some(data)
   };
 
-  Ok((latest_entry, next_position))
+  Ok(((first_entry, first_position), (latest_entry, next_position)))
 }
 
 /// 指定されたカーソルを現在の位置から `distance` バイト前方に移動します。移動先がカーソルの先頭を超える場合は

@@ -35,11 +35,11 @@ fn verify_the_number_of_cache_entries_for_level() {
 fn load_cache_from_storage() -> Result<()> {
   for level in 0..=5 {
     let mut storage = CacheStorage::new();
-    let (_, mut position) = storage.boot()?;
+    let (_, mut position) = storage.last()?;
     for i in 1..=256 {
       position = storage.put(position, &create_mock_entry(i))?;
 
-      let (entry, _) = storage.boot()?;
+      let (entry, _) = storage.last()?;
       let entry = entry.unwrap();
       let cache = Cache::load(&mut storage, level, entry.clone())?;
 
@@ -107,7 +107,11 @@ impl CacheStorage {
 }
 
 impl Storage<Entry> for CacheStorage {
-  fn boot(&mut self) -> Result<(Option<Entry>, Position)> {
+  fn first(&mut self) -> Result<(Option<Entry>, Position)> {
+    unimplemented!()
+  }
+
+  fn last(&mut self) -> Result<(Option<Entry>, Position)> {
     Ok((self.cache.read()?.get(&(self.n - 1)).cloned(), self.n))
   }
 

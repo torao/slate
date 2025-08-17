@@ -569,7 +569,7 @@ impl<S: Storage<Entry>> Slate<S> {
   }
 
   fn load_metadata(storage: &mut S, level: usize) -> Result<(Cache, Position)> {
-    let (latest_entry, position) = storage.boot()?;
+    let (latest_entry, position) = storage.last()?;
     let cache = match latest_entry {
       Some(entry) => Cache::load(storage, level, entry)?,
       None => Cache::empty(level),
@@ -953,6 +953,36 @@ impl Query {
     F: FnMut(Entry),
   {
     unimplemented!()
+  }
+
+  /// 指定されたインデックスのエントリを読み出します。
+  pub fn read_entry(&mut self, i: Index) -> Result<Option<Entry>> {
+    fn _read_entry(
+      cursor: &mut Box<dyn Reader<Entry>>,
+      cache: &Cache,
+      entry: Entry,
+      i: Index,
+    ) -> Result<Option<Entry>> {
+      if entry.enode.meta.address.i == i {
+        return Ok(Some(entry));
+      }
+      for inode in entry.inodes.iter() {
+        if contains(inode.left.i, inode.left.j, i) {
+          let entry = if let Some(entry) = cache.entry(inode.left.i) {
+            entry.clone()
+          } else {
+            read_entry_with_index_check(cursor, inode.left.position, inode.left.i)?
+          };
+          return _read_entry(cursor, cache, entry, i);
+        }
+      }
+      Ok(None)
+    }
+    if let Some(entry) = self.cache.entry(self.revision()).cloned() {
+      _read_entry(&mut self.cursor, &self.cache, entry, i)
+    } else {
+      Ok(None)
+    }
   }
 }
 

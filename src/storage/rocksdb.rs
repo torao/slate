@@ -28,7 +28,11 @@ impl RocksDBStorage {
 }
 
 impl<S: Serializable> Storage<S> for RocksDBStorage {
-  fn boot(&mut self) -> Result<(Option<S>, Position)> {
+  fn first(&mut self) -> Result<(Option<S>, Position)> {
+    unimplemented!()
+  }
+
+  fn last(&mut self) -> Result<(Option<S>, Position)> {
     let guard = self.db.write()?;
     match guard.get(&self.key_for_metadata)? {
       Some(value) => {
