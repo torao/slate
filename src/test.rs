@@ -448,9 +448,8 @@ pub fn random_payload(length: usize, seed: u64) -> Vec<u8> {
 pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
   let tmp = temprary_directory();
   for i in 0u16..=u16::MAX {
-    let file_name = format!("slate-{prefix}{i}{suffix}");
-    let mut file = tmp.to_path_buf();
-    file.push(file_name);
+    let file_name = if i == 0 { format!("slate-{prefix}{suffix}") } else { format!("slate-{prefix}_{i}{suffix}") };
+    let file = tmp.to_path_buf().join(file_name);
     match OpenOptions::new().write(true).create_new(true).open(&file) {
       Ok(_) => return file,
       Err(err) if err.kind() == ErrorKind::AlreadyExists => (),
@@ -465,10 +464,9 @@ pub fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
 pub fn temp_dir(prefix: &str, suffix: &str) -> PathBuf {
   let tmp = temprary_directory();
   for i in 0u16..=u16::MAX {
-    let dir_name = format!("slate-{prefix}{i}{suffix}");
-    let mut dir = tmp.to_path_buf();
-    dir.push(dir_name);
-    if create_dir_all(&dir).is_ok() {
+    let dir_name = if i == 0 { format!("slate-{prefix}{suffix}") } else { format!("slate-{prefix}_{i}{suffix}") };
+    let dir = tmp.to_path_buf().join(dir_name);
+    if !dir.exists() && create_dir_all(&dir).is_ok() {
       return dir;
     }
   }
