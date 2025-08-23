@@ -53,7 +53,7 @@ pub enum Error {
   #[error("{source}")]
   Otherwise {
     #[from]
-    source: Box<dyn std::error::Error>,
+    source: Box<dyn std::error::Error + Send + Sync>,
   },
 
   #[cfg(feature = "rocksdb")]
@@ -68,4 +68,10 @@ impl<T> From<PoisonError<T>> for Error {
   fn from(err: PoisonError<T>) -> Self {
     Error::LockError(err.to_string())
   }
+}
+
+// Compile-time guarantee that Error is Send + Sync
+fn _assert_send_sync() {
+  fn assert_send_sync<T: Send + Sync>() {}
+  assert_send_sync::<Error>();
 }

@@ -3,12 +3,14 @@ use std::sync::{Arc, RwLock};
 
 use rocksdb::{DB, Options};
 
+use crate::rocksdb::RocksDBStorage;
+use crate::storage::test::verify_storage_compliance_with_standards;
 use crate::test::temp_dir;
-use crate::{rocksdb::RocksDBStorage, test::verify_storage_spec};
+use crate::test::verify_storage_spec;
 
 #[test]
 fn test_rocks_db() {
-  let path = temp_dir("rocksdb", "");
+  let path = temp_dir("test_rocks_db", "");
   remove_dir_all(&path).unwrap();
   {
     let mut opts = Options::default();
@@ -18,4 +20,15 @@ fn test_rocks_db() {
     verify_storage_spec(&mut storage);
   }
   remove_dir_all(&path).unwrap();
+}
+
+#[test]
+fn verify_rocksdb_storage_compliance() -> crate::Result<()> {
+  let path = temp_dir("storage-rocksdb", ".db");
+  {
+    let db = Arc::new(RwLock::new(DB::open_default(&path)?));
+    verify_storage_compliance_with_standards(&db, |db| Box::new(RocksDBStorage::new(db.clone(), &[], false)))?;
+  }
+  remove_dir_all(&path)?;
+  Ok(())
 }

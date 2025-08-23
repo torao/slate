@@ -29,14 +29,23 @@ impl RocksDBStorage {
 
 impl<S: Serializable> Storage<S> for RocksDBStorage {
   fn first(&mut self) -> Result<(Option<S>, Position)> {
-    unimplemented!()
+    let key = self.key(1);
+    let guard = self.db.read()?;
+    match guard.get(&key)? {
+      Some(value) => {
+        let data = S::read(&mut Cursor::new(&value), 1)?;
+        Ok((Some(data), 1))
+      }
+      None => Ok((None, 1)),
+    }
   }
 
   fn last(&mut self) -> Result<(Option<S>, Position)> {
-    let guard = self.db.write()?;
+    let guard = self.db.read()?;
     match guard.get(&self.key_for_metadata)? {
       Some(value) => {
         let position = Cursor::new(&value[..8]).read_u64::<LittleEndian>()?;
+        debug_assert!(position != 0);
         let key = self.key(position - 1);
         match guard.get(&key)? {
           Some(value) => {
@@ -51,6 +60,8 @@ impl<S: Serializable> Storage<S> for RocksDBStorage {
   }
 
   fn put(&mut self, position: Position, entry: &S) -> Result<Position> {
+    debug_assert!(position != 0);
+
     // エントリをバイト配列に変換
     let key = self.key(position);
     let mut value = Vec::with_capacity(1024);
@@ -62,13 +73,11 @@ impl<S: Serializable> Storage<S> for RocksDBStorage {
       guard.put(key, value)?;
 
       // メタデータの保存
-      let meatadata = match guard.get(&self.key_for_metadata)? {
-        Some(mut value) => {
-          Cursor::new(&mut value).write_u64::<LittleEndian>(position + 1)?;
-          value
-        }
+      let mut meatadata = match guard.get(&self.key_for_metadata)? {
+        Some(value) => value,
         None => vec![0u8; 8],
       };
+      Cursor::new(&mut meatadata).write_u64::<LittleEndian>(position + 1)?;
       guard.put(&self.key_for_metadata, meatadata)?;
     }
 

@@ -2,7 +2,7 @@ use crate::checksum::hasher;
 use crate::formula::Model;
 use crate::storage::{read_data, write_data};
 use crate::test::{random_payload, temp_file, verify_storage_spec};
-use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, Index, MetaInfo, Result, Serializable};
+use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, Index, MetaInfo, Result, Serializable, Storage};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::remove_file;
 use std::hash::Hasher;
@@ -96,6 +96,60 @@ fn verify_the_u64_at_the_end_is_checksum(entry_buffer: &[u8]) {
   hasher.write_all(&entry_buffer[..(entry_buffer.len() - u64::BITS as usize / 8)]).unwrap();
   let actual = hasher.finish();
   assert_eq!(expected, actual);
+}
+
+#[test]
+fn verify_file_storage_compliance() -> Result<()> {
+  let path = temp_file("storage-file", ".db");
+  verify_storage_compliance_with_standards(&path, |path| Box::new(BlockStorage::from_file(path, false).unwrap()))?;
+  remove_file(&path)?;
+  Ok(())
+}
+
+impl Serializable for u64 {
+  fn write<W: Write>(&self, w: &mut W) -> Result<usize> {
+    w.write_u64::<LittleEndian>(*self)?;
+    Ok(8)
+  }
+  fn read<R: io::Read + Seek>(r: &mut R, _position: super::Position) -> Result<Self> {
+    let p = r.read_u64::<LittleEndian>()?;
+    Ok(p)
+  }
+}
+
+pub fn verify_storage_compliance_with_standards<T, F: Fn(&T) -> Box<dyn Storage<u64>>>(
+  target: &T,
+  create: F,
+) -> Result<()> {
+  {
+    let mut storage = create(target);
+    let (first, p2) = storage.first()?;
+    let (last, p1) = storage.last()?;
+    assert_eq!(None, first);
+    assert_eq!(None, last);
+    assert_eq!(p1, p2);
+  }
+  let (p1, mut p) = {
+    let mut storage = create(target);
+    let (first, p1) = storage.first()?;
+    let (last, p2) = storage.last()?;
+    assert_eq!(None, last);
+    assert_eq!(None, first);
+    assert_eq!(p1, p2);
+    let p = storage.put(p2, &1)?;
+    (p1, p)
+  };
+  for i in 2..=100 {
+    let mut storage = create(target);
+    let (first, pf) = storage.first()?;
+    let (last, pl) = storage.last()?;
+    assert_eq!(Some(1), first);
+    assert_eq!(Some(i - 1), last);
+    assert_eq!(p1, pf);
+    assert_eq!(p, pl);
+    p = storage.put(pl, &i)?;
+  }
+  Ok(())
 }
 
 // TODO ストレージ末尾の 4 バイトの指す位置がたまたま最後より前の要素だった場合に、その要素を最後の要素とみなして
