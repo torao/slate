@@ -631,6 +631,22 @@ impl Slate<BlockStorage<FileDevice>> {
   }
 }
 
+#[cfg(feature = "rocksdb")]
+impl Slate<crate::storage::rocksdb::RocksDBStorage> {
+  pub fn on_rocksdb<P: AsRef<Path>>(path: P, read_only: bool) -> Result<Self> {
+    use ::rocksdb::{DB, Options};
+    let db = if read_only {
+      let mut opts = Options::default();
+      opts.create_if_missing(true);
+      DB::open_for_read_only(&opts, path, true)?
+    } else {
+      DB::open_default(path)?
+    };
+    let storage = rocksdb::RocksDBStorage::new(Arc::new(RwLock::new(db)), &[], false);
+    Slate::new(storage)
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalkDirection {
   Left,
