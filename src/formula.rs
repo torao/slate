@@ -277,7 +277,7 @@ pub fn auth_path_length(n: Index, i: Index) -> u8 {
 
 /// n 個の要素を持つ木構造 𝑇ₙ において、最新のエントリ eₙ から指定されたエントリ eᵢ までの距離を計算します。
 /// Slate においては 1 エントリごとに 1 回の I/O Read が発生するため、この関数の返値は n 世代において eᵢ にアクセスするための
-/// コストと見なすことができます。
+/// コストと見なすことができます。これは非線形ですが、n-1 と i-1 との 2 進数表現でのハミング距離と似た分布の特徴を持ちます。
 pub fn entry_access_distance(k: Index, n: Index) -> Option<u8> {
   pbst_roots(n)
     .find(|root| contains(root.i, root.j, k))
@@ -285,7 +285,20 @@ pub fn entry_access_distance(k: Index, n: Index) -> Option<u8> {
 }
 
 /// n 個の要素を持つ木構造 𝑇ₙ において、最新のエントリ eₙ からデータ列の任意の位置までの距離の上限と下限の範囲を
-/// (upper-limit-range, lower-limit-range) で返します。
+/// (upper-limit-range, lower-limit-range) で返します。つまり、各配列のインデックスは最新エントリからの距離、
+/// 値はそのインデックス範囲を表します。
+///
+/// ## Example
+///
+/// ```
+/// let (ul, ll) = slate::formula::entry_access_distance_limits(12);
+/// for (distance, range) in [(12, 12), (10, 11), (6, 9), (2, 5), (1, 1)].iter().enumerate() {
+///   assert_eq!(*range, (*ul[distance].start(), *ul[distance].end()));
+/// }
+/// for (distance, range) in [(12, 12), (8, 11), (4, 7), (2, 3), (1, 1)].iter().enumerate() {
+///   assert_eq!(*range, (*ll[distance].start(), *ll[distance].end()));
+/// }
+/// ```
 pub fn entry_access_distance_limits(n: Index) -> (Vec<RangeInclusive<Index>>, Vec<RangeInclusive<Index>>) {
   if n == 0 {
     return (Vec::new(), Vec::new());

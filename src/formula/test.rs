@@ -207,7 +207,7 @@ fn verify_entry_access_distance_limit() {
       }
     }
 
-    //
+    // エントリ数 n に対する上限/下限の範囲を取得
     let (ul, ll) = entry_access_distance_limits(n);
 
     assert_eq!(ds_ul.len(), ul.len());
