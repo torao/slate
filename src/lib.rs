@@ -370,6 +370,7 @@ impl Serializable for Entry {
   }
 }
 
+#[derive(Debug)]
 enum CachedEntry<'a> {
   Cached(&'a Entry),
   Fresh(Entry),
@@ -403,6 +404,7 @@ impl<'a> AsRef<Entry> for CachedEntry<'a> {
 ///
 pub const MAX_PAYLOAD_SIZE: usize = 0x7FFFFFFF;
 
+#[derive(Debug)]
 pub struct Snapshot<'a, S: Storage<Entry>> {
   cache: Arc<Cache>,
   storage: &'a S,
@@ -425,6 +427,7 @@ impl<'a, S: Storage<Entry>> Snapshot<'a, S> {
 }
 
 /// ストレージ上に直列化された Stratified Hash Tree を表す木構造に対する操作を実装します。
+#[derive(Debug)]
 pub struct Slate<S: Storage<Entry>> {
   position: Position,
   storage: S,

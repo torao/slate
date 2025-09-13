@@ -4,6 +4,7 @@ use std::sync::{Arc, LockResult, RwLock};
 
 /// メモリ上の領域をストレージとして使用する実装です。`drop()` された時点で記録していた内容が消滅するため、テストや
 /// 調査での使用を想定しています。
+#[derive(Debug)]
 pub struct MemoryDevice {
   read_only: bool,
   buffer: Arc<RwLock<Vec<u8>>>,

@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 #[cfg(test)]
 mod test;
 
+#[derive(Debug)]
 pub struct RocksDBStorage {
   db: Arc<RwLock<DB>>,
   key_prefix: Vec<u8>,

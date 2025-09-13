@@ -67,6 +67,7 @@ impl<B: BlockDevice, S: Serializable> Reader<S> for B {
   }
 }
 
+#[derive(Debug)]
 pub struct BlockStorage<B: BlockDevice> {
   device: B,
   position: u64,

@@ -5,6 +5,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// ローカルファイルをストレージとして使用する実装です。
+#[derive(Debug)]
 pub struct FileDevice {
   /// 読み出し時にオープンするためのこのファイルのパス。
   path: PathBuf,
