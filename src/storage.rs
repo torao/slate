@@ -40,6 +40,12 @@ pub trait Storage<S: Serializable> {
   /// 次のデータの位置を返します。
   fn put(&mut self, position: Position, data: &S) -> Result<Position>;
 
+  /// 指定された位置以降のデータを削除します。
+  /// 次のデータの [put] 位置はここで指定した position を指定する必要があります。
+  /// 処理中のクエリーが存在する場合、それらの処理はこの切り詰めによってエラーが発生する可能性があります。
+  /// 実際に切り詰めが行われた場合に true を返し、範囲外などでストレージに変化がない場合に false を返します。
+  fn truncate(&mut self, position: Position) -> Result<bool>;
+
   /// データを読み込むためのカーソルを参照します。
   fn reader(&self) -> Result<Box<dyn Reader<S>>>;
 }
@@ -53,6 +59,7 @@ pub trait Reader<S: Serializable> {
 // ----------------------------------------
 
 pub trait BlockDevice: Read + Write + Seek {
+  fn truncate(&mut self, position: Position) -> Result<bool>;
   fn clone_device(&self) -> Result<Self>
   where
     Self: std::marker::Sized;
@@ -140,6 +147,15 @@ impl<B: BlockDevice + 'static, S: Serializable> Storage<S> for BlockStorage<B> {
     bw.flush()?;
     self.position += length as u64;
     Ok(self.position)
+  }
+
+  fn truncate(&mut self, position: Position) -> Result<bool> {
+    if self.device.truncate(position)? {
+      self.position = position;
+      Ok(true)
+    } else {
+      Ok(false)
+    }
   }
 }
 

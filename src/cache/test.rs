@@ -124,6 +124,19 @@ impl Storage<Entry> for CacheStorage {
     Ok(self.n)
   }
 
+  fn truncate(&mut self, position: Position) -> Result<bool> {
+    let mut lock = self.cache.write()?;
+    if position < self.n {
+      for i in position..self.n {
+        lock.remove(&i);
+      }
+      self.n = position;
+      Ok(true)
+    } else {
+      Ok(false)
+    }
+  }
+
   fn reader(&self) -> Result<Box<dyn crate::Reader<Entry>>> {
     struct R {
       cache: Arc<RwLock<HashMap<Position, Entry>>>,

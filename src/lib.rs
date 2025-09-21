@@ -559,6 +559,22 @@ impl<S: Storage<Entry>> Slate<S> {
     Ok(MetaInfo::new(Address::new(i, j, position), root_hash))
   }
 
+  /// Delete entries starting from the specified index `i`.
+  /// If queries are currently in progress, the truncate operations may cause errors in their read processing. If these
+  /// must be performed concurrently, ensure proper Read/Write locks are established.
+  pub fn truncate(&mut self, i: Index) -> Result<bool> {
+    if let Some(entry) = self.snapshot().query()?.read_entry(i)? {
+      self.storage.truncate(entry.enode.meta.address.position)?;
+      let (cache, position) = Self::load_metadata(&mut self.storage, self.cache.level())?;
+      debug_assert_eq!(entry.enode.meta.address.position, position);
+      self.position = position;
+      self.cache = Arc::new(cache);
+      Ok(true)
+    } else {
+      Ok(false)
+    }
+  }
+
   /// Create a snapshot for the current revision.
   pub fn snapshot(&self) -> Snapshot<'_, S> {
     Snapshot { cache: self.cache.clone(), storage: &self.storage }

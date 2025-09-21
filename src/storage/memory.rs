@@ -33,6 +33,20 @@ impl Default for MemoryDevice {
 }
 
 impl BlockDevice for MemoryDevice {
+  fn truncate(&mut self, position: Position) -> Result<bool> {
+    if self.read_only {
+      return Err(io::Error::new(io::ErrorKind::PermissionDenied, "this memory device is read-only").into());
+    }
+    let mut guard = lock2io(self.buffer.write())?;
+    if position < guard.len() as Position {
+      guard.truncate(position as usize);
+      self.position = position;
+      Ok(true)
+    } else {
+      Ok(false)
+    }
+  }
+
   fn clone_device(&self) -> Result<Self> {
     let read_only = true; // クローンは常に read-only
     let buffer = self.buffer.clone();
@@ -56,7 +70,7 @@ impl Read for MemoryDevice {
 impl Write for MemoryDevice {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
     if self.read_only {
-      return Err(io::Error::new(io::ErrorKind::PermissionDenied, "file is read-only"));
+      return Err(io::Error::new(io::ErrorKind::PermissionDenied, "this memory device is read-only"));
     }
     let mut guard = lock2io(self.buffer.write())?;
     let mut cursor = Cursor::new(&mut *guard);

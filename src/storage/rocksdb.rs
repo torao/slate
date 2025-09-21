@@ -1,7 +1,8 @@
-use crate::{Error, INDEX_SIZE, Index, Position, Result, Storage};
+use crate::{INDEX_SIZE, Index, Position, Result, Storage};
 use crate::{Reader, Serializable};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use rocksdb::DB;
+use std::io;
 use std::io::Cursor;
 use std::sync::{Arc, RwLock};
 
@@ -26,6 +27,32 @@ impl RocksDBStorage {
   fn key(&self, i: Index) -> Vec<u8> {
     create_key(i, self.key_hashing, &self.key_prefix)
   }
+
+  fn get_metadata(&self, guard: &DB) -> Result<Option<Position>> {
+    match guard.get(&self.key_for_metadata)? {
+      Some(value) => {
+        let position = Cursor::new(&value[..8]).read_u64::<LittleEndian>()?;
+        debug_assert!(position != 0);
+        Ok(Some(position))
+      }
+      None => Ok(None),
+    }
+  }
+
+  fn set_metadata(&self, guard: &DB, next_position: Position) -> Result<()> {
+    debug_assert!(next_position != 0);
+    if next_position == 1 {
+      guard.delete(&self.key_for_metadata)?;
+    } else {
+      let mut meatadata = match guard.get(&self.key_for_metadata)? {
+        Some(value) => value,
+        None => vec![0u8; 8],
+      };
+      Cursor::new(&mut meatadata).write_u64::<LittleEndian>(next_position)?;
+      guard.put(&self.key_for_metadata, meatadata)?;
+    }
+    Ok(())
+  }
 }
 
 impl<S: Serializable> Storage<S> for RocksDBStorage {
@@ -43,17 +70,15 @@ impl<S: Serializable> Storage<S> for RocksDBStorage {
 
   fn last(&mut self) -> Result<(Option<S>, Position)> {
     let guard = self.db.read()?;
-    match guard.get(&self.key_for_metadata)? {
-      Some(value) => {
-        let position = Cursor::new(&value[..8]).read_u64::<LittleEndian>()?;
-        debug_assert!(position != 0);
-        let key = self.key(position - 1);
+    match self.get_metadata(&guard)? {
+      Some(next_position) => {
+        let key = self.key(next_position - 1);
         match guard.get(&key)? {
           Some(value) => {
-            let data = S::read(&mut Cursor::new(&value), position - 1)?;
-            Ok((Some(data), position))
+            let last_data = S::read(&mut Cursor::new(&value), next_position - 1)?;
+            Ok((Some(last_data), next_position))
           }
-          None => key_not_found(&key, position),
+          None => key_not_found(&key, next_position),
         }
       }
       None => Ok((None, 1)),
@@ -74,16 +99,37 @@ impl<S: Serializable> Storage<S> for RocksDBStorage {
       guard.put(key, value)?;
 
       // メタデータの保存
-      let mut meatadata = match guard.get(&self.key_for_metadata)? {
-        Some(value) => value,
-        None => vec![0u8; 8],
-      };
-      Cursor::new(&mut meatadata).write_u64::<LittleEndian>(position + 1)?;
-      guard.put(&self.key_for_metadata, meatadata)?;
+      self.set_metadata(&guard, position + 1)?;
     }
 
     Ok(position + 1)
   }
+
+  fn truncate(&mut self, position: Position) -> Result<bool> {
+    debug_assert!(position != 0);
+
+    let guard = self.db.write()?;
+    if let Some(next_position) = self.get_metadata(&guard)? {
+      debug_assert!(next_position != 0);
+      if position < next_position {
+        let mut p = position;
+        loop {
+          let key = self.key(p);
+          match guard.get(&key)? {
+            Some(_) => {
+              guard.delete(key)?;
+              p += 1;
+            }
+            None => break,
+          }
+        }
+        self.set_metadata(&guard, position)?;
+        return Ok(true);
+      }
+    }
+    Ok(false)
+  }
+
   fn reader(&self) -> Result<Box<dyn Reader<S>>> {
     let db = self.db.clone();
     let key_prefix = self.key_prefix.clone();
@@ -128,7 +174,11 @@ fn bijective_scramble(mut x: u64) -> u64 {
 }
 
 fn key_not_found<T>(key: &[u8], position: Position) -> Result<T> {
-  Err(Error::InternalStateInconsistency {
-    message: format!("There is no entry stored for key {key:?} corresponding to position {position}"),
-  })
+  Err(
+    io::Error::new(
+      io::ErrorKind::NotFound,
+      format!("There is no entry stored for key {key:?} corresponding to position {position}"),
+    )
+    .into(),
+  )
 }

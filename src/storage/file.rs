@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::{BlockDevice, Result};
+use crate::{BlockDevice, Position, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -52,12 +52,24 @@ impl FileDevice {
 }
 
 impl BlockDevice for FileDevice {
+  fn truncate(&mut self, position: Position) -> Result<bool> {
+    let current = self.file.stream_position()?;
+    debug_assert_eq!(self.file.metadata()?.len(), current);
+    if position < current {
+      self.file.set_len(position)?;
+      Ok(true)
+    } else {
+      Ok(false)
+    }
+  }
+
   fn clone_device(&self) -> Result<Self>
   where
     Self: std::marker::Sized,
   {
     let file = self.read_options.open(&self.path)?;
-    Ok(Self { path: self.path.clone(), read_options: self.read_options.clone(), file })
+    let read_options = self.read_options.clone();
+    Ok(Self { path: self.path.clone(), read_options, file })
   }
 }
 

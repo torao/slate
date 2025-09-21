@@ -144,6 +144,47 @@ fn append_and_get() {
   }
 }
 
+/// データを追加して切り詰めします。
+#[test]
+fn append_and_truncate() {
+  const N: u64 = 100;
+  for n in 1..=N {
+    let mut db = prepare_db(n, PAYLOAD_SIZE);
+
+    // 範囲外のエントリを削除
+    assert!(!db.truncate(n + 1).unwrap());
+    assert_eq!(n, db.n());
+    assert_eq!(None, db.snapshot().query().unwrap().get(n + 1).unwrap());
+    assert_eq!(Some(random_payload(PAYLOAD_SIZE, n)), db.snapshot().query().unwrap().get(n).unwrap());
+
+    // 最後のエントリのみを削除
+    assert!(db.truncate(n).unwrap());
+    assert_eq!(n - 1, db.n());
+    assert_eq!(None, db.snapshot().query().unwrap().get(n).unwrap());
+    if n > 1 {
+      assert_eq!(Some(random_payload(PAYLOAD_SIZE, n - 1)), db.snapshot().query().unwrap().get(n - 1).unwrap());
+    }
+
+    // 中間以降のエントリを削除
+    let s = n / 2 + 1;
+    if s != n {
+      assert!(db.truncate(s).unwrap());
+      assert_eq!(s - 1, db.n());
+      assert_eq!(None, db.snapshot().query().unwrap().get(s).unwrap());
+      if s > 1 {
+        assert_eq!(Some(random_payload(PAYLOAD_SIZE, s - 1)), db.snapshot().query().unwrap().get(s - 1).unwrap());
+      }
+    }
+
+    // 先頭のエントリを削除
+    if n != 1 {
+      assert!(db.truncate(1).unwrap());
+      assert_eq!(0, db.n());
+      assert_eq!(None, db.snapshot().query().unwrap().get(1).unwrap());
+    }
+  }
+}
+
 /// n 個の要素を持つ Slate を構築します。それぞれの要素は乱数で初期化された `payload_size` サイズの値を持ちます。
 fn prepare_db(n: u64, payload_size: usize) -> Slate<BlockStorage<MemoryDevice>> {
   let buffer = Arc::new(RwLock::new(Vec::<u8>::with_capacity(4 * 1024)));
@@ -162,7 +203,7 @@ fn prepare_db(n: u64, payload_size: usize) -> Slate<BlockStorage<MemoryDevice>> 
 }
 
 /// 指定されたストレージが仕様に準拠していることを検証します。
-pub fn verify_storage_spec<S: Storage<Entry>>(storage: &mut S) {
+pub fn verify_storage_spec<S: Storage<Entry> + Debug>(storage: &mut S) {
   // まだ書き込んでいない状態では末尾のエントリは存在しない
   let (entry, first_position) = storage.last().unwrap();
   assert!(entry.is_none());
@@ -195,6 +236,69 @@ pub fn verify_storage_spec<S: Storage<Entry>>(storage: &mut S) {
       assert_eq!(hash, entry.enode.meta.hash);
       assert_eq!(&expected, &entry);
     }
+  }
+
+  // 先頭での切り詰めは空のストレージになる
+  assert!(storage.truncate(first_position).unwrap());
+  let (entry, truncated_first_position) = storage.last().unwrap();
+  assert_eq!(first_position, truncated_first_position);
+  assert!(entry.is_none());
+
+  // 空の状態での切り詰めは何も起きない
+  assert!(!storage.truncate(first_position).unwrap());
+  let (entry, truncated_first_position) = storage.last().unwrap();
+  assert_eq!(first_position, truncated_first_position);
+  assert!(entry.is_none());
+
+  // 現在のポジションを越えた切り詰めは何も起きない
+  assert!(!storage.truncate(100).unwrap());
+  let (entry, truncated_first_position) = storage.last().unwrap();
+  assert_eq!(first_position, truncated_first_position);
+  assert!(entry.is_none());
+
+  // 書き込みの実行
+  let mut positions = [truncated_first_position].to_vec();
+  for _ in 0..256 {
+    let i = positions.len() as u64;
+    let position = *positions.last().unwrap();
+    let value = i.to_le_bytes().to_vec();
+    let entry = build_entry(i, &value, &positions);
+    positions.push(storage.put(position, &entry).unwrap());
+  }
+  assert!(!storage.truncate(*positions.last().unwrap()).unwrap());
+  assert!(!storage.truncate(*positions.last().unwrap() + 1).unwrap());
+
+  // 末尾から順にエントリを削除
+  positions.pop();
+  while !positions.is_empty() {
+    let n = positions.len() as Index;
+    let position = positions.pop().unwrap();
+    let mut reader = storage.reader().unwrap(); // 切り詰め前に作成した reader
+    let entry = reader.read(position).unwrap();
+    assert_eq!(n, entry.enode.meta.address.i);
+    assert_eq!(position, entry.enode.meta.address.position);
+    assert!(storage.truncate(position).unwrap());
+    for i in 1..n {
+      let p = positions[i as usize - 1];
+      let e2 = reader.read(p).unwrap();
+      let e3 = storage.reader().unwrap().read(p).unwrap();
+      assert_eq!(i, e2.enode.meta.address.i);
+      assert_eq!(p, e2.enode.meta.address.position);
+      assert_eq!(e2, e3);
+    }
+    let (el, p) = storage.last().unwrap();
+    match positions.last() {
+      Some(pl) => {
+        assert_eq!(reader.read(*pl).unwrap(), el.clone().unwrap());
+        assert_eq!(el.unwrap().enode.meta.address.position, *pl);
+      }
+      None => {
+        assert_eq!(None, el);
+        assert_eq!(first_position, p);
+      }
+    }
+    assert!(matches!(reader.read(position), Err(Error::Io { .. })));
+    assert!(matches!(storage.reader().unwrap().read(position), Err(Error::Io { .. })));
   }
 }
 
