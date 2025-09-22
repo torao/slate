@@ -56,6 +56,8 @@ impl RocksDBStorage {
 }
 
 impl<S: Serializable> Storage<S> for RocksDBStorage {
+  type Reader = RocksDBReader;
+
   fn first(&mut self) -> Result<(Option<S>, Position)> {
     let key = self.key(1);
     let guard = self.db.read()?;
@@ -130,15 +132,15 @@ impl<S: Serializable> Storage<S> for RocksDBStorage {
     Ok(false)
   }
 
-  fn reader(&self) -> Result<Box<dyn Reader<S>>> {
+  fn reader(&self) -> Result<Self::Reader> {
     let db = self.db.clone();
     let key_prefix = self.key_prefix.clone();
     let key_hashing = self.key_hashing;
-    Ok(Box::new(RocksDBReader { db, key_prefix, key_hashing }))
+    Ok(RocksDBReader { db, key_prefix, key_hashing })
   }
 }
 
-struct RocksDBReader {
+pub struct RocksDBReader {
   db: Arc<RwLock<DB>>,
   key_prefix: Vec<u8>,
   key_hashing: bool,

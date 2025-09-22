@@ -107,6 +107,7 @@ impl CacheStorage {
 }
 
 impl Storage<Entry> for CacheStorage {
+  type Reader = CacheReader;
   fn first(&mut self) -> Result<(Option<Entry>, Position)> {
     unimplemented!()
   }
@@ -137,15 +138,16 @@ impl Storage<Entry> for CacheStorage {
     }
   }
 
-  fn reader(&self) -> Result<Box<dyn crate::Reader<Entry>>> {
-    struct R {
-      cache: Arc<RwLock<HashMap<Position, Entry>>>,
-    }
-    impl Reader<Entry> for R {
-      fn read(&mut self, position: Position) -> Result<Entry> {
-        Ok(self.cache.read()?.get(&position).unwrap().clone())
-      }
-    }
-    Ok(Box::new(R { cache: self.cache.clone() }))
+  fn reader(&self) -> Result<Self::Reader> {
+    Ok(CacheReader { cache: self.cache.clone() })
+  }
+}
+
+struct CacheReader {
+  cache: Arc<RwLock<HashMap<Position, Entry>>>,
+}
+impl Reader<Entry> for CacheReader {
+  fn read(&mut self, position: Position) -> Result<Entry> {
+    Ok(self.cache.read()?.get(&position).unwrap().clone())
   }
 }

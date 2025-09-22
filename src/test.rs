@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::path::{MAIN_SEPARATOR, PathBuf};
 use std::sync::RwLock;
 use std::thread::{JoinHandle, spawn};
+use std::time::Instant;
 
 use crate::formula::{auth_path_length, ceil_log2, total_nodes};
 use crate::memory::MemoryDevice;
@@ -39,6 +40,36 @@ fn test_multi_threaded_query() {
       assert!(result.is_ok(), "{:?}", result.unwrap_err());
     }
   }
+}
+
+#[test]
+fn test_multi_threaded_single_append_and_multiple_queries() {
+  const N: u64 = 100;
+  const WAIT_TIME_SECONDS: u64 = 3;
+  let mut db = prepare_db(N, PAYLOAD_SIZE);
+
+  // ロックを使用しないでデータの追加とクエリを並行して実行できることを確認
+  let snapshot = db.snapshot();
+  let n = snapshot.n();
+  let mut query = snapshot.query().unwrap();
+  let query_thread = spawn(move || {
+    let start = Instant::now();
+    while start.elapsed().as_secs() < WAIT_TIME_SECONDS {
+      for i in 1..=n {
+        let value = query.get(i).unwrap().unwrap();
+        assert_eq!(&random_payload(PAYLOAD_SIZE, i), &value);
+      }
+    }
+  });
+
+  let start = Instant::now();
+  while start.elapsed().as_secs() < WAIT_TIME_SECONDS {
+    let n = db.n();
+    let value = random_payload(PAYLOAD_SIZE, n + 1);
+    db.append(value.as_slice()).unwrap();
+  }
+
+  query_thread.join().unwrap();
 }
 
 #[test]

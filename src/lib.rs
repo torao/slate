@@ -419,7 +419,11 @@ impl<'a, S: Storage<Entry>> Snapshot<'a, S> {
     self.cache.revision()
   }
 
-  pub fn query(&self) -> Result<Query> {
+  pub fn n(&self) -> Index {
+    self.cache.revision()
+  }
+
+  pub fn query(&self) -> Result<Query<S>> {
     let cursor = self.storage.reader()?;
     let revision = self.cache.clone();
     Ok(Query { cursor, cache: revision })
@@ -615,7 +619,7 @@ impl<S: Storage<Entry>> Slate<S> {
           entry = if let Some(e) = self.cache.entry(inode.left.i) {
             CachedEntry::Cached(e)
           } else {
-            CachedEntry::Fresh(read_entry_with_index_check(&mut reader, inode.left.position, inode.left.i)?)
+            CachedEntry::Fresh(read_entry_with_index_check::<S>(&mut reader, inode.left.position, inode.left.i)?)
           };
         }
         None => {
@@ -819,12 +823,12 @@ impl AuthPath {
   }
 }
 
-pub struct Query {
-  cursor: Box<dyn Reader<Entry>>,
+pub struct Query<S: Storage<Entry>> {
+  cursor: S::Reader,
   cache: Arc<Cache>,
 }
 
-impl Query {
+impl<S: Storage<Entry>> Query<S> {
   /// Refers to the revison (equivalent to a generation or snapshot) of the tree structure that this query is targeting.
   pub fn revision(&self) -> Index {
     self.cache.revision()
@@ -907,7 +911,7 @@ impl Query {
         // TODO Is there a way to use cached entries without cloning them?
         left_entry.clone()
       } else {
-        read_entry_with_index_check(&mut self.cursor, current.left.position, current.left.i)?
+        read_entry_with_index_check::<S>(&mut self.cursor, current.left.position, current.left.i)?
       };
       debug_assert_eq!(current.left.i, left.enode.meta.address.i);
       debug_assert!(left.enode.meta.address.i < i);
@@ -992,12 +996,10 @@ impl Query {
 
   /// 指定されたインデックスのエントリを読み出します。
   pub fn read_entry(&mut self, i: Index) -> Result<Option<Entry>> {
-    fn _read_entry(
-      cursor: &mut Box<dyn Reader<Entry>>,
-      cache: &Cache,
-      entry: Entry,
-      i: Index,
-    ) -> Result<Option<Entry>> {
+    fn _read_entry<S>(cursor: &mut S::Reader, cache: &Cache, entry: Entry, i: Index) -> Result<Option<Entry>>
+    where
+      S: Storage<Entry>,
+    {
       if entry.enode.meta.address.i == i {
         return Ok(Some(entry));
       }
@@ -1006,26 +1008,29 @@ impl Query {
           let entry = if let Some(entry) = cache.entry(inode.left.i) {
             entry.clone()
           } else {
-            read_entry_with_index_check(cursor, inode.left.position, inode.left.i)?
+            read_entry_with_index_check::<S>(cursor, inode.left.position, inode.left.i)?
           };
-          return _read_entry(cursor, cache, entry, i);
+          return _read_entry::<S>(cursor, cache, entry, i);
         }
       }
       Ok(None)
     }
     if let Some(entry) = self.cache.entry(self.revision()).cloned() {
-      _read_entry(&mut self.cursor, &self.cache, entry, i)
+      _read_entry::<S>(&mut self.cursor, &self.cache, entry, i)
     } else {
       Ok(None)
     }
   }
 }
 
-pub(crate) fn read_entry_with_index_check(
-  r: &mut Box<dyn Reader<Entry>>,
+pub(crate) fn read_entry_with_index_check<S>(
+  r: &mut S::Reader,
   position: Position,
   expected_index: Index,
-) -> Result<Entry> {
+) -> Result<Entry>
+where
+  S: Storage<Entry>,
+{
   let entry = r.read(position)?;
   let actual_index = entry.enode.meta.address.i;
   if actual_index != expected_index {

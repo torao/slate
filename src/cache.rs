@@ -1,5 +1,5 @@
 use crate::formula::{Model, is_pbst};
-use crate::{Address, Entry, Index, MetaInfo, Reader, Result, Storage, read_entry_with_index_check};
+use crate::{Address, Entry, Index, MetaInfo, Result, Storage, read_entry_with_index_check};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,15 +56,15 @@ impl Cache {
     let mut cache = HashMap::new();
     cache.insert(last_entry.enode.meta.address.i, last_entry.clone());
     if level > 0 {
-      let mut reader = storage.reader()?;
-      Self::load_with_level(&mut reader, level, &level1_addrs, &mut cache)?;
+      let mut reader = Box::new(storage.reader()?);
+      Self::load_with_level::<S>(&mut reader, level, &level1_addrs, &mut cache)?;
     }
 
     let entries = if level == 0 {
       let mut reader = storage.reader()?;
       let mut level1_entries = HashMap::new();
       level1_entries.insert(last_entry.enode.meta.address.i, last_entry.clone());
-      Self::load_with_level(&mut reader, 1, &level1_addrs, &mut level1_entries)?;
+      Self::load_with_level::<S>(&mut reader, 1, &level1_addrs, &mut level1_entries)?;
       Cow::Owned(level1_entries)
     } else {
       Cow::Borrowed(&cache)
@@ -146,19 +146,22 @@ impl Cache {
     self.cache.get(&i).map(|e| e.as_ref())
   }
 
-  fn load_with_level(
-    reader: &mut Box<dyn Reader<Entry>>,
+  fn load_with_level<S>(
+    reader: &mut S::Reader,
     level: usize,
     addrs: &[Address],
     cache: &mut HashMap<Index, Arc<Entry>>,
-  ) -> Result<()> {
+  ) -> Result<()>
+  where
+    S: Storage<Entry>,
+  {
     for addr in addrs.iter() {
-      let entry = read_entry_with_index_check(reader, addr.position, addr.i)?;
+      let entry = read_entry_with_index_check::<S>(reader, addr.position, addr.i)?;
       let i = entry.enode.meta.address.i;
       if level > 1 {
         let left_addrs = entry.inodes.iter().map(|inode| inode.left).collect::<Vec<_>>();
         cache.insert(i, Arc::new(entry));
-        Self::load_with_level(reader, level - 1, &left_addrs, cache)?;
+        Self::load_with_level::<S>(reader, level - 1, &left_addrs, cache)?;
       } else {
         cache.insert(i, Arc::new(entry));
       }

@@ -27,7 +27,7 @@ fn verify_rocksdb_storage_compliance() -> crate::Result<()> {
   let path = temp_dir("storage-rocksdb", ".db");
   {
     let db = Arc::new(RwLock::new(DB::open_default(&path)?));
-    verify_storage_compliance_with_standards(&db, |db| Box::new(RocksDBStorage::new(db.clone(), &[], false)))?;
+    verify_storage_compliance_with_standards(&db, |db| RocksDBStorage::new(db.clone(), &[], false))?;
   }
   remove_dir_all(&path)?;
   Ok(())

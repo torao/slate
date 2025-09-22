@@ -101,7 +101,7 @@ fn verify_the_u64_at_the_end_is_checksum(entry_buffer: &[u8]) {
 #[test]
 fn verify_file_storage_compliance() -> Result<()> {
   let path = temp_file("storage-file", ".db");
-  verify_storage_compliance_with_standards(&path, |path| Box::new(BlockStorage::from_file(path, false).unwrap()))?;
+  verify_storage_compliance_with_standards(&path, |path| BlockStorage::from_file(path, false).unwrap())?;
   remove_file(&path)?;
   Ok(())
 }
@@ -117,10 +117,11 @@ impl Serializable for u64 {
   }
 }
 
-pub fn verify_storage_compliance_with_standards<T, F: Fn(&T) -> Box<dyn Storage<u64>>>(
-  target: &T,
-  create: F,
-) -> Result<()> {
+pub fn verify_storage_compliance_with_standards<T, S, F>(target: &T, create: F) -> Result<()>
+where
+  S: Storage<u64>,
+  F: Fn(&T) -> S,
+{
   {
     let mut storage = create(target);
     let (first, p2) = storage.first()?;

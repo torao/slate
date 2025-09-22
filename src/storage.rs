@@ -27,6 +27,8 @@ pub trait Serializable: Sized {
 
 /// ハッシュツリーのデータを保存するために抽象化されたストレージです。
 pub trait Storage<S: Serializable> {
+  type Reader: Reader<S>;
+
   /// 先頭に位置するデータとその位置を返します。
   /// ストレージにまだデータが保存されていない場合は None を返します。
   /// 通常は使用されず、データストアのメンテナンスやデバッグ用に用意しています。
@@ -47,11 +49,11 @@ pub trait Storage<S: Serializable> {
   fn truncate(&mut self, position: Position) -> Result<bool>;
 
   /// データを読み込むためのカーソルを参照します。
-  fn reader(&self) -> Result<Box<dyn Reader<S>>>;
+  fn reader(&self) -> Result<Self::Reader>;
 }
 
 /// ストレージからデータを読み込むためのカーソルです。
-pub trait Reader<S: Serializable> {
+pub trait Reader<S: Serializable>: Sized {
   // 指定された位置からデータを読み出して返します。
   fn read(&mut self, position: Position) -> Result<S>;
 }
@@ -121,9 +123,10 @@ impl BlockStorage<FileDevice> {
 }
 
 impl<B: BlockDevice + 'static, S: Serializable> Storage<S> for BlockStorage<B> {
-  fn reader(&self) -> Result<Box<dyn Reader<S>>> {
+  type Reader = B;
+  fn reader(&self) -> Result<Self::Reader> {
     let device = self.device.clone_device()?;
-    Ok(Box::new(device))
+    Ok(device)
   }
 
   fn first(&mut self) -> Result<(Option<S>, Position)> {
