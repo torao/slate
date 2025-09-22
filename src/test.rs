@@ -47,17 +47,38 @@ fn test_multi_threaded_single_append_and_multiple_queries() {
   const N: u64 = 100;
   const WAIT_TIME_SECONDS: u64 = 3;
   let mut db = prepare_db(N, PAYLOAD_SIZE);
-
-  // ロックを使用しないでデータの追加とクエリを並行して実行できることを確認
   let snapshot = db.snapshot();
   let n = snapshot.n();
+
+  // ロックを使用しないでデータの追加とクエリを並行して実行できることを確認
   let mut query = snapshot.query().unwrap();
-  let query_thread = spawn(move || {
+  let get_thread = spawn(move || {
     let start = Instant::now();
     while start.elapsed().as_secs() < WAIT_TIME_SECONDS {
       for i in 1..=n {
         let value = query.get(i).unwrap().unwrap();
         assert_eq!(&random_payload(PAYLOAD_SIZE, i), &value);
+      }
+    }
+  });
+
+  let mut query = snapshot.query().unwrap();
+  let scan_thread = spawn(move || {
+    let start = Instant::now();
+    while start.elapsed().as_secs() < WAIT_TIME_SECONDS {
+      for i in 1..=n {
+        let mut scanned = 0u64;
+        let count = query
+          .scan(1, i, &mut |entry| -> Result<()> {
+            scanned += 1;
+            assert_eq!(scanned, entry.enode.meta.address.i);
+            let value = entry.enode.payload;
+            assert_eq!(&random_payload(PAYLOAD_SIZE, scanned), &value);
+            Ok(())
+          })
+          .unwrap();
+        assert_eq!(i, count);
+        assert_eq!(i, scanned);
       }
     }
   });
@@ -69,7 +90,8 @@ fn test_multi_threaded_single_append_and_multiple_queries() {
     db.append(value.as_slice()).unwrap();
   }
 
-  query_thread.join().unwrap();
+  get_thread.join().unwrap();
+  scan_thread.join().unwrap();
 }
 
 #[test]
@@ -175,6 +197,106 @@ fn append_and_get() {
   }
 }
 
+#[test]
+fn append_and_scan() {
+  const N: u64 = 105;
+  let n = N - 5;
+  let mut db = prepare_db(N, PAYLOAD_SIZE);
+  let snapshot = db.snapshot_at(n).unwrap();
+  let mut query = snapshot.query().unwrap();
+
+  // 全ノードをスキャン
+  let mut scanned = 0u64;
+  let count = query
+    .scan(1, n, &mut |entry| -> Result<()> {
+      scanned += 1;
+      assert_eq!(scanned, entry.enode.meta.address.i);
+      let expected = random_payload(PAYLOAD_SIZE, scanned);
+      let actual = entry.enode.payload;
+      assert_eq!(&expected, &actual);
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(n, count);
+  assert_eq!(n, scanned);
+
+  // 範囲内の任意の部分をスキャン
+  for i in 0..10 {
+    let i0 = splitmix64(i) % n + 1;
+    let i1 = splitmix64(i + 10) % n + 1;
+    let (i0, i1) = (min(i0, i1), max(i0, i1));
+    scanned = 0u64;
+    let count = query
+      .scan(i0, i1, &mut |entry| -> Result<()> {
+        scanned += 1;
+        assert_eq!(i0 + scanned - 1, entry.enode.meta.address.i);
+        let expected = random_payload(PAYLOAD_SIZE, i0 + scanned - 1);
+        let actual = entry.enode.payload;
+        assert_eq!(&expected, &actual, "{i0}..{i1}, scanned={scanned}");
+        Ok(())
+      })
+      .unwrap();
+    assert_eq!((i1).abs_diff(i0) + 1, count, "{i0}, {i1}");
+    assert_eq!((i1).abs_diff(i0) + 1, scanned, "{i0}, {i1}");
+  }
+
+  // 境界を超えたスキャンは何も起きない
+  let mut scanned = 0u64;
+  let count = query
+    .scan(n + 1, u64::MAX, &mut |_| -> Result<()> {
+      scanned += 1;
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(0, count);
+  assert_eq!(0, scanned);
+
+  let mut scanned = 0u64;
+  let count = query
+    .scan(0, 0, &mut |_| -> Result<()> {
+      scanned += 1;
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(0, count);
+  assert_eq!(0, scanned);
+
+  // 部分的に範囲を超えたスキャンは有効な部分のみスキャンされる
+  let mut scanned = 0u64;
+  let count = query
+    .scan(n, n + 1, &mut |entry| -> Result<()> {
+      scanned += 1;
+      assert_eq!(n, entry.enode.meta.address.i);
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(1, count);
+  assert_eq!(1, scanned);
+
+  let mut scanned = 0u64;
+  let count = query
+    .scan(0, 1, &mut |entry| -> Result<()> {
+      scanned += 1;
+      assert_eq!(1, entry.enode.meta.address.i);
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(1, count);
+  assert_eq!(1, scanned);
+
+  // スキャン範囲の上下逆転を補正して有効な範囲内に収める
+  let mut scanned = 0u64;
+  let count = query
+    .scan(u64::MAX, 0, &mut |entry| -> Result<()> {
+      scanned += 1;
+      assert_eq!(scanned, entry.enode.meta.address.i);
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(n, count);
+  assert_eq!(n, scanned);
+}
+
 /// データを追加して切り詰めします。
 #[test]
 fn append_and_truncate() {
@@ -269,6 +391,11 @@ pub fn verify_storage_spec<S: Storage<Entry> + Debug>(storage: &mut S) {
     }
   }
 
+  verify_storage_truncate(storage, first_position);
+  verify_storage_scan(storage, first_position);
+}
+
+fn verify_storage_truncate<S: Storage<Entry> + Debug>(storage: &mut S, first_position: Position) {
   // 先頭での切り詰めは空のストレージになる
   assert!(storage.truncate(first_position).unwrap());
   let (entry, truncated_first_position) = storage.last().unwrap();
@@ -331,6 +458,45 @@ pub fn verify_storage_spec<S: Storage<Entry> + Debug>(storage: &mut S) {
     assert!(matches!(reader.read(position), Err(Error::Io { .. })));
     assert!(matches!(storage.reader().unwrap().read(position), Err(Error::Io { .. })));
   }
+}
+
+fn verify_storage_scan<S: Storage<Entry> + Debug>(storage: &mut S, first_position: Position) {
+  // 読み出し用データの作成
+  const N: Index = 256;
+  storage.truncate(first_position).unwrap();
+  let mut positions = [first_position].to_vec();
+  for i in 1..=N {
+    let position = *positions.last().unwrap();
+    let value = i.to_le_bytes().to_vec();
+    let entry = build_entry(i, &value, &positions);
+    positions.push(storage.put(position, &entry).unwrap());
+  }
+
+  // すべてのエントリをスキャン
+  let mut reader = storage.reader().unwrap();
+  let mut scanned = 0u64;
+  let count = reader
+    .scan(first_position, N, |entry| -> Result<()> {
+      scanned += 1;
+      let i = scanned as Index;
+      let expected = build_entry(i, i.to_le_bytes().as_ref(), &positions);
+      assert_eq!(expected, entry);
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(N, count);
+  assert_eq!(N, scanned);
+
+  // 範囲を超えたスキャンは何も起きない
+  let mut scanned = 0u64;
+  let count = reader
+    .scan(u64::MAX, u64::MAX, |_| -> Result<()> {
+      scanned += 1;
+      Ok(())
+    })
+    .unwrap();
+  assert_eq!(0, count);
+  assert_eq!(0, scanned);
 }
 
 #[test]

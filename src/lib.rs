@@ -987,11 +987,26 @@ impl<S: Storage<Entry>> Query<S> {
   }
 
   // 指定された範囲 [i0, i1] (両端を含む) のエントリを取得します。
-  pub fn scan<F>(&self, _i0: Index, _i1: Index, _callback: &mut F)
+  pub fn scan<E, F>(&mut self, i0: Index, i1: Index, callback: &mut F) -> Result<u64>
   where
-    F: FnMut(Entry),
+    E: std::error::Error + Send + Sync + 'static,
+    F: FnMut(Entry) -> std::result::Result<(), E>,
   {
-    unimplemented!()
+    let n = self.cache.revision();
+    let (i0, i1) = if i0 <= i1 { (i0, i1) } else { (i1, i0) };
+    let (i0, i1) = (i0.max(1), i1.min(n));
+    if i0 > i1 {
+      return Ok(0);
+    }
+
+    debug_assert!(1 <= i0 && i0 <= n && 1 <= i1 && i1 <= n && i0 <= i1);
+    if let Some(entry) = { self.read_entry(i0)? } {
+      let position = entry.enode.meta.address.position;
+      let count = i1 - i0 + 1;
+      self.cursor.scan(position, count, callback)
+    } else {
+      Ok(0)
+    }
   }
 
   /// 指定されたインデックスのエントリを読み出します。

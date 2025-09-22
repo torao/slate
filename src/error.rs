@@ -44,6 +44,9 @@ pub enum Error {
   #[error("{0}")]
   InvalidArgument(String),
 
+  #[error("The user function returned an error during the callback: {0}")]
+  Callback(Box<dyn std::error::Error + Send + Sync>),
+
   #[error("I/O error: {source}")]
   Io {
     #[from]

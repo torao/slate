@@ -1,6 +1,6 @@
 use crate::Result;
 use crate::checksum::{ChecksumRead, ChecksumWrite};
-use crate::error::Error::*;
+use crate::error::Error::{self, *};
 use crate::file::FileDevice;
 use crate::memory::MemoryDevice;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -56,6 +56,13 @@ pub trait Storage<S: Serializable> {
 pub trait Reader<S: Serializable>: Sized {
   // 指定された位置からデータを読み出して返します。
   fn read(&mut self, position: Position) -> Result<S>;
+
+  /// 指定された位置から連続するデータを最大 `count` 件まで読み出し、コールバック関数に渡します。
+  /// `count` 件の読み出し前にストレージの終端に達した場合、そこで処理を終了し、実際に読み出された件数を返します。
+  fn scan<E, F>(&mut self, position: Position, count: u64, callback: F) -> Result<u64>
+  where
+    E: std::error::Error + Send + Sync + 'static,
+    F: FnMut(S) -> std::result::Result<(), E>;
 }
 
 // ----------------------------------------
@@ -73,6 +80,26 @@ impl<B: BlockDevice, S: Serializable> Reader<S> for B {
 
     let mut br = BufReader::new(self);
     read_data(&mut br, position)
+  }
+
+  fn scan<E, F>(&mut self, mut position: Position, count: u64, mut callback: F) -> Result<u64>
+  where
+    E: std::error::Error + Send + Sync + 'static,
+    F: FnMut(S) -> std::result::Result<(), E>,
+  {
+    let mut read = 0;
+    let last = self.seek(SeekFrom::End(0))?;
+    if position < last {
+      let mut br = BufReader::new(self);
+      br.seek(SeekFrom::Start(position))?;
+      while position < last && read < count {
+        let data = read_data(&mut br, position)?;
+        callback(data).map_err(|e| Error::Callback(Box::new(e)))?;
+        read += 1;
+        position = br.stream_position()?;
+      }
+    }
+    Ok(read)
   }
 }
 

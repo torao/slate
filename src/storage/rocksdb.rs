@@ -1,3 +1,4 @@
+use crate::Error;
 use crate::{INDEX_SIZE, Index, Position, Result, Storage};
 use crate::{Reader, Serializable};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -155,6 +156,28 @@ impl<S: Serializable> Reader<S> for RocksDBReader {
     } else {
       key_not_found(&key, position)
     }
+  }
+
+  fn scan<E, F>(&mut self, mut position: Position, count: u64, mut callback: F) -> Result<u64>
+  where
+    E: std::error::Error + Send + Sync + 'static,
+    F: FnMut(S) -> std::result::Result<(), E>,
+  {
+    let db = self.db.read()?;
+    let mut read = 0;
+    for _ in 0..count {
+      let key = create_key(position, self.key_hashing, &self.key_prefix);
+      match db.get(&key)? {
+        Some(value) => {
+          let data = S::read(&mut Cursor::new(&value), position)?;
+          callback(data).map_err(|e| Error::Callback(Box::new(e)))?;
+          read += 1;
+          position += 1;
+        }
+        None => break,
+      }
+    }
+    Ok(read)
   }
 }
 

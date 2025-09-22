@@ -150,4 +150,24 @@ impl Reader<Entry> for CacheReader {
   fn read(&mut self, position: Position) -> Result<Entry> {
     Ok(self.cache.read()?.get(&position).unwrap().clone())
   }
+
+  fn scan<E, F>(&mut self, mut position: Position, count: u64, mut callback: F) -> Result<u64>
+  where
+    E: std::error::Error + Send + Sync + 'static,
+    F: FnMut(Entry) -> std::result::Result<(), E>,
+  {
+    let cache = self.cache.read()?;
+    let last = cache.len() as Position;
+    let mut read = 0;
+    for _ in 0..count {
+      if position >= last {
+        break;
+      }
+      let data = cache.get(&position).unwrap().clone();
+      callback(data).map_err(|e| crate::Error::Callback(Box::new(e)))?;
+      read += 1;
+      position += 1;
+    }
+    Ok(read)
+  }
 }
