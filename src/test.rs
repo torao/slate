@@ -567,7 +567,7 @@ fn walk_down_randomly_left_and_right() {
         } else {
           let ((il, jl), (ir, jr)) = subnodes_of(i, j);
           rand = splitmix64(rand);
-          if rand % 2 == 0 {
+          if rand.is_multiple_of(2) {
             next = Some((il, jl));
             WalkDirection::Left
           } else {
