@@ -1,5 +1,6 @@
 use crate::checksum::hasher;
 use crate::formula::Model;
+use crate::memory::MemKVS;
 use crate::storage::{read_data, write_data};
 use crate::test::{random_payload, temp_file, verify_storage_spec};
 use crate::{Address, BlockStorage, ENode, Entry, Hash, INode, Index, MetaInfo, Result, Serializable, Storage};
@@ -77,10 +78,16 @@ fn test_file_storage() {
   remove_file(&path).unwrap_or_else(|_| panic!("failed to remove temporary file: {}", path.to_string_lossy()));
 }
 
-/// メモリーストレージの適合テスト
+/// メモリーブロックストレージの適合テスト
 #[test]
 fn test_memory_storage() {
   verify_storage_spec(&mut BlockStorage::memory());
+}
+
+/// メモリー KVS ストレージの適合テスト
+#[test]
+fn test_memkvs_storage() {
+  verify_storage_spec(&mut MemKVS::new());
 }
 
 /// エントリの直列表現のチェックサムを検証します。

@@ -28,7 +28,7 @@ use crate::error::Error::*;
 use crate::formula::{Model, contains, root_of, subnodes_of};
 use crate::serialize::{read_entry_from, write_entry_to};
 use crate::storage::file::FileDevice;
-use crate::storage::memory::MemoryDevice;
+use crate::storage::memory::{MemKVS, MemoryDevice};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Seek, Write};
@@ -641,9 +641,21 @@ impl Slate<BlockStorage<MemoryDevice>> {
   }
   pub fn new_on_memory_with_capacity(capacity: usize) -> Self {
     let buffer = Arc::new(RwLock::new(Vec::with_capacity(capacity)));
+    Self::new_on_memory_with_buffer(buffer)
+  }
+  pub fn new_on_memory_with_buffer(buffer: Arc<RwLock<Vec<u8>>>) -> Self {
     let device = MemoryDevice::with(buffer, false);
     let storage = BlockStorage::new(device);
     Self::new(storage).expect("Memory storage initialization should never fail")
+  }
+}
+
+impl Slate<MemKVS<Entry>> {
+  pub fn new_on_memkvs() -> Self {
+    Self::new(MemKVS::new()).expect("Memory storage initialization should never fail")
+  }
+  pub fn new_on_memkvs_with_hashmap(kvs: Arc<RwLock<HashMap<Position, Entry>>>) -> Self {
+    Self::new(MemKVS::with_kvs(kvs)).expect("Memory storage initialization should never fail")
   }
 }
 
@@ -656,7 +668,7 @@ impl Slate<BlockStorage<FileDevice>> {
 
 #[cfg(feature = "rocksdb")]
 impl Slate<crate::storage::rocksdb::RocksDBStorage> {
-  pub fn on_rocksdb<P: AsRef<Path>>(path: P, read_only: bool) -> Result<Self> {
+  pub fn new_on_rocksdb<P: AsRef<Path>>(path: P, read_only: bool) -> Result<Self> {
     use ::rocksdb::{DB, Options};
     let db = if read_only {
       let mut opts = Options::default();
